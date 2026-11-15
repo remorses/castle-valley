@@ -7,6 +7,8 @@ import { hex, shared } from './paint.ts'
 
 /** render size of the reference frame the sprites were cut from */
 const REFERENCE = { width: 270, height: 405 }
+// On a wide screen the hands stay this far apart at most, in sprite pixels: about 1.1 times the screen's height.
+const HANDS_MAX_SPAN = 445
 const SWING_SECONDS = 0.42
 const SPARK_COUNT = 14
 const SPARK_COLORS = ['#eea757', '#c8743a', '#a3512c'].map(hex)
@@ -27,6 +29,8 @@ const SWORD = {
   margin: [52, 60],
   /** the wrist: the sword swings around it */
   pivot: [60, 112],
+  /** the sleeve runs off the right edge of the sprite up to this height */
+  cut: 112,
 }
 
 const SPRITE_VERTEX = /* glsl */ `
@@ -168,6 +172,8 @@ export function buildViewModel() {
 
   let width = REFERENCE.width
   let scale = 1
+  let inset = 0
+  let swordDrop = 0
   let swing = -1
 
   return {
@@ -181,6 +187,11 @@ export function buildViewModel() {
       width = renderWidth
       // sprites are 1:1 on a tall screen and shrink to fit the height of a wide one
       scale = Math.min(renderWidth / REFERENCE.width, renderHeight / REFERENCE.height)
+      // how far each hand is moved in from its corner of the screen
+      inset = Math.max(0, (renderWidth / scale - HANDS_MAX_SPAN) / 2)
+      // Moved in, the sword arm would show where its sleeve ends at the sprite's edge: it is lowered until the
+      // sleeve is below the screen and the fist rises from the bottom edge.
+      swordDrop = (SWORD.cut - SWORD.margin[1]) * THREE.MathUtils.smoothstep(inset, 0, SWORD.margin[0])
       torch.scale.setScalar(scale)
       sword.scale.setScalar(scale)
     },
@@ -193,7 +204,7 @@ export function buildViewModel() {
       const lag = THREE.MathUtils.clamp(turn * 4, -10, 10)
       const idle = Math.sin(time * 1.1) * 1.2
       torch.position.set(
-        Math.round((-TORCH.margin[0] + Math.sin(bob) * 4 * stride + lag) * scale),
+        Math.round((inset - TORCH.margin[0] + Math.sin(bob) * 4 * stride + lag) * scale),
         Math.round((-TORCH.margin[1] + Math.abs(Math.cos(bob)) * 5 * stride + idle) * scale),
         0,
       )
@@ -201,8 +212,8 @@ export function buildViewModel() {
       if (swing >= 0) swing += dt / SWING_SECONDS
       if (swing > 1) swing = -1
       const slash = swing < 0 ? 0 : Math.sin(Math.PI * swing)
-      const restX = width / scale - (SWORD.size[0] - SWORD.margin[0]) + SWORD.pivot[0]
-      const restY = -SWORD.margin[1] + SWORD.pivot[1]
+      const restX = width / scale - inset - (SWORD.size[0] - SWORD.margin[0]) + SWORD.pivot[0]
+      const restY = -SWORD.margin[1] - swordDrop + SWORD.pivot[1]
       sword.position.set(
         Math.round((restX + Math.sin(bob + 1.3) * 5 * stride + lag * 1.4 - slash * 46) * scale),
         Math.round((restY + Math.abs(Math.cos(bob + 1.3)) * 6 * stride - idle - slash * 14) * scale),
