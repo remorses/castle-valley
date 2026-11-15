@@ -153,6 +153,11 @@ export const shared = {
   // the way the wind blows over the ground (x, z): from the left of the first view, and a little toward it
   uWind: { value: new THREE.Vector2(0.94, 0.34).normalize() },
   tBrush: { value: createBrushSheet() },
+  // a stroke narrower than x reference pixels on the canvas is plain, one wider than y has all its detail;
+  // z: how much of the broken colour a plain stroke keeps
+  uFine: { value: new THREE.Vector3(1.2, 3.2, 0.6) },
+  // the most depth a lying stroke is stepped toward the eye, in clip space: see the dab shader
+  uDepthStep: { value: 5e-6 },
   // where the sun reaches: a picture of the still world's depth as the sun sees it
   tShade,
   uShadeMatrix: { value: new THREE.Matrix4() },
@@ -271,7 +276,10 @@ varying vec2 vUv;
 varying vec3 vC1;
 varying vec3 vC2;
 varying vec4 vAxis;
+varying float vFine;
+uniform vec3 uFine;
 const float TAU = 6.28318530718;
+uniform float uDepthStep;
 ${AIR}
 ${WIND}
 vec4 hash4(float n) {
@@ -325,6 +333,11 @@ void main() {
   if (alive <= 0.0) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
   if (uMax.x > 0.0) size = min(size, uMax * px);
   vec2 half_ = size * 0.5 * alive;
+  // A stroke that is small on the canvas is one plain touch of one mixed colour, in the plain mark of the brush
+  // sheet: the bristles, the streak and the thickness of a stroke a few pixels wide would only be noise. Far things
+  // are painted in fewer, plainer tones.
+  vFine = smoothstep(uFine.x, uFine.y, size.x / px);
+  float broken = uJitter * mix(uFine.z, 1.0, vFine);
 
   vec2 across, along;
   if (aNormal.w > 0.5) {
@@ -367,6 +380,11 @@ void main() {
     vc.xy += across * position.x * half_.x + along * (position.y + foot) * half_.y;
   }
   gl_Position = projectionMatrix * vc;
+  // Strokes that overlap on one surface lie millimetres apart. Far away a depth cannot tell them from each other,
+  // or from the underpainting, and they would change places whenever the eye moved. Each is given its own small
+  // step of depth toward the eye, for good. A step of depth is more metres the farther away it is, as the
+  // coarseness of the depth is: about a millimetre at 10 m and 10 cm at 100 m.
+  if (aNormal.w > 0.5) gl_Position.z -= (0.3 + r.y) * uDepthStep * gl_Position.w;
 
   float cell = first + floor(r.z * count * 0.999);
   // laid mirrored or with either end first, so one mark does not repeat
@@ -376,9 +394,11 @@ void main() {
   vUv = (vec2(mod(cell, ${BRUSH_COLUMNS}.0), floor(cell / ${BRUSH_COLUMNS}.0)) + q) / vec2(${BRUSH_COLUMNS}.0, ${BRUSH_ROWS}.0);
   // the dab takes sun or shade whole, so a shadow's edge is a ragged line of whole dabs
   // (asked where the dab is pinned, not where the wind has it: or it would flick between sun and shade)
-  vec3 c = jitter(lit(aColor.rgb, (modelMatrix * vec4(aPos, 1.0)).xyz), r.yzw, uJitter);
+  vec3 c = jitter(lit(aColor.rgb, (modelMatrix * vec4(aPos, 1.0)).xyz), r.yzw, broken);
+  // (a plain stroke has the mean tone of one with its lighter streak)
+  c *= mix(1.06, 1.0, vFine);
   vC1 = hazed(c, world.xyz);
-  vC2 = hazed(jitter(c * 1.22 + 0.012, r.wxy, uJitter * 1.2), world.xyz);
+  vC2 = hazed(mix(c, jitter(c * 1.22 + 0.012, r.wxy, broken * 1.2), vFine), world.xyz);
   vAxis = vec4(across * flip, along * end_);
 }
 `
@@ -390,11 +410,14 @@ varying vec2 vUv;
 varying vec3 vC1;
 varying vec3 vC2;
 varying vec4 vAxis;
+varying float vFine;
 void main() {
   vec4 t = texture2D(tBrush, vUv);
+  // a stroke that is small on the canvas is the plain mark: one clean shape, no bristle gaps or dry end
+  float paint = mix(t.a, t.g, vFine);
   // The edge of the mark is one pixel wide on the canvas, however large the mark is drawn: the antialiasing
   // samples then cut it cleanly. An edge many pixels wide would be a band of stipple that crawls as the eye moves.
-  float cover = clamp((t.g - 0.46) / max(fwidth(t.g), 1e-4) + 0.5, 0.0, 1.0);
+  float cover = clamp((paint - 0.46) / max(fwidth(paint), 1e-4) + 0.5, 0.0, 1.0);
   if (cover <= 0.0) discard;
   vec2 e = vec2(1.5 / 512.0, 0.0);
   float hu = texture2D(tBrush, vUv + e.xy).r - texture2D(tBrush, vUv - e.xy).r;
@@ -404,9 +427,9 @@ void main() {
   // No ridge at the very rim of the mark, where the paint ends: it would be a line one pixel wide that shimmers.
   float rake = (0.5 * g.x - 0.7 * g.y) * smoothstep(0.5, 0.9, t.g);
   vec3 col = mix(vC1, vC2, smoothstep(0.52, 0.78, t.b));
-  col *= mix(0.95, 1.04, t.r);
-  col *= 1.0 + rake * 1.25 * uImpasto;
-  col += vec3(1.0, 0.97, 0.9) * pow(max(rake, 0.0), 2.0) * 1.2 * uImpasto;
+  col *= mix(1.0, mix(0.95, 1.04, t.r), vFine);
+  col *= 1.0 + rake * 1.25 * uImpasto * vFine;
+  col += vec3(1.0, 0.97, 0.9) * pow(max(rake, 0.0), 2.0) * 1.2 * uImpasto * vFine;
   gl_FragColor = vec4(col, cover);
 }
 `

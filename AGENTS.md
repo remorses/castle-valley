@@ -30,11 +30,15 @@ The painter follows https://patch.gg/blendi/oil-paint (source: `~/Documents/GitH
 `src/oilpaint/dabs.js`, `src/night/kit.js`, `src/world/forest.js` and `src/night/pines.js` before changing a painter.
 
 - **Everything visible is a dab or an under mesh.** No lights. The look must stay pinned to the world: never add
-  an effect that makes the look on screen (pixel grids, blurs, outlines). The finish only grades and antialiases.
+  an effect that makes the look on screen (pixel grids, blurs, outlines). The finish only grades, antialiases and firms edges.
 - **The finish** (`main.ts`) is the one pass over the picture. The world is drawn into a render target (4 samples)
-  and finished pixel by pixel: antialiasing (FXAA), the grade (shade toward violet, light toward warm, a lift in the darks), then the
+  and finished pixel by pixel: antialiasing (FXAA that reaches 2 pixels, a longer reach smears small strokes), a
+  sharpening that never passes the lightest or darkest neighbour (`sharpened`), the grade (shade toward violet,
+  light toward warm, a lift in the darks), then the
   weave of the canvas, a rolloff of the brightest paint, and varnish. The palette is saturated on purpose and
   the grade holds it together. The hands are drawn after it, unfinished.
+- **The picture is drawn at the screen's own pixels** (up to 2400 on the short side): stretched, far things turn
+  soft. `keepPace` gives up pixels a step at a time when most frames are slow. Stroke sizes do not depend on it.
 - **Dabs** are instanced cards that show one mark of the brush sheet. `face` dabs turn to the eye and run along
   `dir` on the canvas. `lie` dabs lie on a surface and are stood up when seen edge on. Edges are cut with
   alpha to coverage, so the render target needs its samples. A mark's edge is one pixel wide on screen
@@ -52,6 +56,9 @@ The painter follows https://patch.gg/blendi/oil-paint (source: `~/Documents/GitH
   top of a fir). Grass bends from its foot. Shade is asked where a dab is pinned, not where the wind has it.
   `buildFlyingLeaves` is a box of torn-off leaves round the eye. The sky turns with the wind (`SKY_TURN` in
   `main.ts`), so `skyAt` mixes its seam behind the start (`SKY_SEAM`).
+- **Lying strokes get a depth step** (`uDepthStep` in the dab shader): each is moved toward the eye by its own
+  small amount of clip depth, so strokes that overlap on one surface never fight for depth far away. Do not turn
+  `depthWrite` off for things in the valley: they must hide each other.
 - **Far strokes are `layered`** (`far` and `sky` in `KINDS`): they leave no depth and are laid far to near, in the
   order they are pushed. A depth is too coarse out there: with one each, overlapping strokes change places
   whenever the eye moves and the picture flickers. Push new far things in far to near order.
@@ -61,6 +68,9 @@ The painter follows https://patch.gg/blendi/oil-paint (source: `~/Documents/GitH
   screen in reference pixels (270 on the short side), sway, broken colour, shade and mist.
 - **Far dabs:** each dab has a fixed rank. Past the distance where it would be smaller than its least size, only
   the low ranks stay and grow. The vertex shader uses true distance, so turning the head changes nothing.
+  A stroke that is small on screen is plain (`uFine`): less broken colour, no streak or thickness, and the plain
+  mark of the brush sheet (its alpha channel: the same touch as one clean shape, no bristle gaps or dry end).
+  Detail inside a stroke a few pixels wide is noise, and far things then read as a mix of colours.
 - **How fine a thing is painted** depends on how near the player can come (`reachOf` in `world.ts`).
 - **Under meshes** take the light from face normals. Custom geometry must be wound outward.
 - **Colours** never go through `THREE.Color`. `hex()` keeps raw sRGB and the renderer converts nothing.

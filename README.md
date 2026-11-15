@@ -39,9 +39,11 @@ dabs ─── about 2.5 million instanced cards, each one mark of the brush she
   fly past, and the clouds drift.
 - **Mist** puts distance between one row of things and the next: each dab fades by its distance from you.
 - **The finish** runs once over the picture (`src/main.ts`): a colour grade that leans the shade to violet and
-  the light to warm yellow, the weave of the canvas, and a little varnish. It changes colours only.
+  the light to warm yellow, the weave of the canvas, and a little varnish. It also smooths and then firms the
+  edges of the strokes. The picture is drawn at the screen's own pixels, and with fewer when frames are slow.
 - **Far away, fewer and larger dabs.** Each dab has a fixed rank. With distance only the low ranks stay and
-  grow to cover their neighbours, so strokes never swap.
+  grow to cover their neighbours, so strokes never swap. Small strokes use a plain variant of the
+  brush: one clean shape in one colour.
 
 The hands are **pixel sprites** cut from the reference frame and drawn over the world, like Doom weapons.
 

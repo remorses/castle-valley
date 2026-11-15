@@ -3,6 +3,8 @@
 //
 // Each cell holds one mark laid along +v. r: how thick the paint stands, for the light that rakes across it.
 // g: where there is paint at all. b: a slow streak along the bristles, where a second colour was picked up.
+// a: the plain mark, for strokes that are small on the canvas: the same touch as one clean shape with no bristles,
+// gaps or dry end. The dab shader goes from one to the other by the size of the stroke on screen.
 import * as THREE from 'three'
 
 export const BRUSH_COLUMNS = 4
@@ -42,8 +44,8 @@ function noise2(x: number, y: number, seed: number) {
 
 const step = (a: number, b: number, x: number) => ease(Math.min(1, Math.max(0, (x - a) / (b - a))))
 
-/** One mark at u in -1..1 across and v in 0..1 along: [thickness, paint, streak], each 0..1. */
-function mark({ u, v, seed, kind }: { u: number; v: number; seed: number; kind: MarkKind }): [number, number, number] {
+/** One mark at u in -1..1 across and v in 0..1 along: [thickness, paint, streak, plain paint], each 0..1. */
+function mark({ u, v, seed, kind }: { u: number; v: number; seed: number; kind: MarkKind }): [number, number, number, number] {
   const bend = kind === 'curved' ? (seed % 2 ? 0.34 : -0.34) : (hash(seed * 3.1) - 0.5) * 0.12
   const ub = u - bend * (4 * (v - 0.5) * (v - 0.5) - 0.5)
   if (kind === 'pressed') {
@@ -55,7 +57,10 @@ function mark({ u, v, seed, kind }: { u: number; v: number; seed: number; kind: 
     const paint = inside * (noise1(ub * 11, seed + 11) > dry * 0.8 ? 1 : 0.25)
     const ridge = noise1(ub * 13 + noise1(v * 3, seed) * 1.5, seed + 31)
     const thick = paint * (0.4 + 0.22 * ridge * noise1(ub * 9, seed + 5) + 0.3 * step(0.45, 0.95, r) + 0.12 * noise2(ub * 4, v * 6, seed))
-    return [thick, paint, noise2(ub * 3.2, v * 1.3, seed + 20)]
+    // plain: an oval with a slightly uneven rim
+    const angle = Math.atan2(v - 0.5, ub)
+    const rim = 1 + (noise2(Math.cos(angle) * 1.2 + 3, Math.sin(angle) * 1.2 + 3, seed) - 0.5) * 0.2
+    return [thick, paint, noise2(ub * 3.2, v * 1.3, seed + 20), 1 - step(rim - 0.1, rim, r)]
   }
   const wobble = (noise1(v * 5, seed + 3) - 0.5) * 0.1
   const a = Math.abs(ub + wobble)
@@ -76,7 +81,9 @@ function mark({ u, v, seed, kind }: { u: number; v: number; seed: number; kind: 
   // paint pushed out to the sides of the stroke
   const squeezed = step(half - 0.3, half - 0.06, a)
   const thick = paint * (0.3 + 0.22 * furrow * (0.5 + 0.5 * noise1(ub * 11, seed + 13)) + 0.3 * squeezed + 0.25 * load * (1 - step(start, start + 0.25, v)) + 0.1 * noise2(ub * 3, v * 7, seed + 14))
-  return [Math.min(1, thick), paint, noise2(ub * 3.4, v * 1.1, seed + 20)]
+  // plain: round where the brush touched down, tapering where it left, with a slow wobble along its sides
+  const plainHalf = 0.62 * Math.pow(Math.sin(Math.PI * Math.pow(v, 0.75)), 0.55) * (1 + (noise1(v * 3, seed + 1) - 0.5) * 0.14)
+  return [Math.min(1, thick), paint, noise2(ub * 3.4, v * 1.1, seed + 20), 1 - step(plainHalf - 0.08, plainHalf, Math.abs(ub))]
 }
 
 export function createBrushSheet() {
@@ -91,8 +98,8 @@ export function createBrushSheet() {
         const u = ((x + 0.5) / CELL_WIDTH) * 2 - 1
         const v = (y + 0.5) / CELL_HEIGHT
         const outside = Math.abs(u) > MARGIN.side || v < MARGIN.end || v > 1 - MARGIN.end
-        const [thick, paint, streak] = outside ? [0, 0, 0.5] : mark({ u: u / MARGIN.side, v: (v - MARGIN.end) / (1 - 2 * MARGIN.end), seed: cell * 7 + 1, kind })
-        data.set([Math.round(thick * 255), Math.round(paint * 255), Math.round(streak * 255), 255], (column * CELL_WIDTH + x + (row * CELL_HEIGHT + y) * width) * 4)
+        const [thick, paint, streak, plain] = outside ? [0, 0, 0.5, 0] : mark({ u: u / MARGIN.side, v: (v - MARGIN.end) / (1 - 2 * MARGIN.end), seed: cell * 7 + 1, kind })
+        data.set([Math.round(thick * 255), Math.round(paint * 255), Math.round(streak * 255), Math.round(plain * 255)], (column * CELL_WIDTH + x + (row * CELL_HEIGHT + y) * width) * 4)
       }
     }
   })

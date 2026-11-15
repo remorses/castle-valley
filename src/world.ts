@@ -577,11 +577,11 @@ const reachOf = (x: number, z: number) => Math.max(0, Math.abs(x) - (valleyHalfW
 // `gust` is how far a full gust pushes a dab, `sway` how far it flutters on its own, metres.
 // `far` holds what stands beyond the valley: it is painted in its own airy colours and takes no mist or shade.
 const KINDS: Record<'solid' | 'wood' | 'leaves' | 'blades' | 'far' | 'sky', DabKind> = {
-  solid: { min: [1.2, 2.2], jitter: 0.45 },
-  wood: { min: [0.8, 2], max: [30, 125], sway: 0.03, gust: 0.4, jitter: 0.6 },
-  leaves: { min: [1.25, 2], max: [36, 56], sway: 0.06, gust: 0.22, jitter: 0.55, shade: 0.5 },
-  blades: { min: [0.6, 3], max: [15, 105], sway: 0.03, gust: 0.22, jitter: 0.55 },
-  far: { min: [1.2, 2.2], jitter: 0.35, shade: 0, mist: false, layered: true },
+  solid: { min: [1.7, 3.1], jitter: 0.45 },
+  wood: { min: [1.1, 2.8], max: [30, 125], sway: 0.03, gust: 0.4, jitter: 0.6 },
+  leaves: { min: [1.75, 2.8], max: [36, 56], sway: 0.06, gust: 0.22, jitter: 0.55, shade: 0.5 },
+  blades: { min: [0.85, 4.2], max: [15, 105], sway: 0.03, gust: 0.22, jitter: 0.55 },
+  far: { min: [1.7, 3.1], jitter: 0.35, shade: 0, mist: false, layered: true },
   sky: { min: [1.6, 3], jitter: 0.2, shade: 0, mist: false, layered: true },
 }
 

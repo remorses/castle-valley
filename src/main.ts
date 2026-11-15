@@ -6,11 +6,22 @@ import { buildViewModel } from './viewmodel.ts'
 import { BACKDROP, buildWorld, groundHeight } from './world.ts'
 
 const REFERENCE_SHORT_SIDE = 270
-// more pixels than this on the short side cost speed and show nothing more
-const MAX_SHORT_SIDE_PIXELS = 1440
+// The picture is drawn at the screen's own pixels, up to this many on its short side: drawn smaller and
+// stretched, far things turn soft.
+const MAX_SHORT_SIDE_PIXELS = 2400
+// When frames are slow it gives up pixels a step at a time, down to this many.
+const MIN_SHORT_SIDE_PIXELS = 1080
+const SLOW_FRAME_SECONDS = 1 / 45
+const PACE_FRAMES = 90
+const PIXEL_STEP = 0.85
 // radians a second: a full turn of the sky in about seven minutes
 const SKY_TURN = 0.015
 const EYE_HEIGHT = 1.7
+// vertical field of view in degrees, for a screen as tall as the reference frame (2:3) and for a wide one (16:10)
+const TALL_FOV = 70
+const WIDE_FOV = 56
+const TALL_ASPECT = 2 / 3
+const WIDE_ASPECT = 1.6
 const WALK_SPEED = 3.4
 const RUN_SPEED = 7
 const PLAYER_RADIUS = 0.4
@@ -42,6 +53,7 @@ const FINISH_FRAGMENT = /* glsl */ `
 uniform sampler2D tColor;
 uniform vec2 uTexel;
 uniform float uSmooth;
+uniform float uSharp;
 uniform vec3 uShade;
 uniform vec3 uLight;
 uniform vec3 uLift;
@@ -66,6 +78,9 @@ float weave(vec2 p) {
 const vec3 LUMA = vec3(0.3, 0.59, 0.11);
 
 // FXAA, after Timothy Lottes: where the picture has a hard edge, it is blurred along that edge and nowhere else.
+// It reaches only two pixels along an edge, not the usual eight: the picture is all small strokes, every one an
+// edge, and a long reach would smear them into each other.
+const float FXAA_SPAN = 2.0;
 vec3 antialiased(vec2 uv) {
   vec3 m = texture2D(tColor, uv).rgb;
   float nw = dot(texture2D(tColor, uv + vec2(-1.0, -1.0) * uTexel).rgb, LUMA);
@@ -77,15 +92,30 @@ vec3 antialiased(vec2 uv) {
   float high = max(mid, max(max(nw, ne), max(sw, se)));
   vec2 dir = vec2(-((nw + ne) - (sw + se)), (nw + sw) - (ne + se));
   float reduce = max((nw + ne + sw + se) * 0.03125, 0.0078125);
-  dir = clamp(dir / (min(abs(dir.x), abs(dir.y)) + reduce), -8.0, 8.0) * uTexel;
+  dir = clamp(dir / (min(abs(dir.x), abs(dir.y)) + reduce), -FXAA_SPAN, FXAA_SPAN) * uTexel;
   vec3 near = 0.5 * (texture2D(tColor, uv + dir * (1.0 / 3.0 - 0.5)).rgb + texture2D(tColor, uv + dir * (2.0 / 3.0 - 0.5)).rgb);
   vec3 wide = near * 0.5 + 0.25 * (texture2D(tColor, uv - dir * 0.5).rgb + texture2D(tColor, uv + dir * 0.5).rgb);
   float l = dot(wide, LUMA);
   return mix(m, l < low || l > high ? near : wide, uSmooth);
 }
 
+// The edge of a stroke is drawn firm again: each pixel is pushed away from the mean of its neighbours, but never
+// past the lightest or darkest of them, so no halo grows round an edge. Passages that are nearly flat are left
+// alone: there is nothing in them to make firm but the grain of the antialiasing.
+vec3 sharpened(vec2 uv, vec3 m) {
+  vec3 n = texture2D(tColor, uv + vec2(0.0, -1.0) * uTexel).rgb;
+  vec3 s = texture2D(tColor, uv + vec2(0.0, 1.0) * uTexel).rgb;
+  vec3 e = texture2D(tColor, uv + vec2(1.0, 0.0) * uTexel).rgb;
+  vec3 w = texture2D(tColor, uv + vec2(-1.0, 0.0) * uTexel).rgb;
+  vec3 low = min(m, min(min(n, s), min(e, w)));
+  vec3 high = max(m, max(max(n, s), max(e, w)));
+  float range = dot(high - low, LUMA);
+  vec3 firm = m + (m - 0.25 * (n + s + e + w)) * uSharp * 2.0 * smoothstep(0.03, 0.1, range);
+  return clamp(firm, low, high);
+}
+
 void main() {
-  vec3 c = antialiased(vUv);
+  vec3 c = sharpened(vUv, antialiased(vUv));
   float l = dot(c, LUMA);
   c = mix(vec3(l), c, uSaturation);
   // the shade leans to violet and the light to a warm yellow
@@ -113,6 +143,7 @@ const finish = new THREE.Mesh(
       tColor: { value: picture.texture },
       uTexel: { value: new THREE.Vector2(1, 1) },
       uSmooth: { value: 1 },
+      uSharp: { value: 0.8 },
       uShade: { value: new THREE.Vector3(0.88, 0.9, 1.12) },
       uLight: { value: new THREE.Vector3(1.04, 1.0, 0.94) },
       uLift: { value: new THREE.Vector3(0.012, 0.008, 0.03) },
@@ -138,23 +169,47 @@ camera.rotation.order = 'YXZ'
 
 const player = { x: world.start.x, z: world.start.z, yaw: world.start.yaw, pitch: world.start.pitch, vx: 0, vz: 0, bob: 0, stride: 0 }
 
+// the share of the screen's pixels that are drawn: falls when frames are slow, see keepPace
+let sharpness = 1
+
 function resize() {
   const short = Math.min(innerWidth, innerHeight)
-  const ratio = Math.min(devicePixelRatio, MAX_SHORT_SIDE_PIXELS / short)
+  const least = Math.min(devicePixelRatio, MIN_SHORT_SIDE_PIXELS / short)
+  const ratio = Math.max(least, Math.min(devicePixelRatio, MAX_SHORT_SIDE_PIXELS / short) * sharpness)
   renderer.setPixelRatio(ratio)
   renderer.setSize(innerWidth, innerHeight)
   picture.setSize(Math.round(innerWidth * ratio), Math.round(innerHeight * ratio))
   finish.material.uniforms.uTexel.value.set(1 / picture.width, 1 / picture.height)
   camera.aspect = innerWidth / innerHeight
-  // the scene is composed for a tall screen: keep a similar horizontal view on wide ones
-  camera.fov = camera.aspect < 1 ? 70 : 56
+  // The scene is composed for a tall screen: a wide one keeps a similar horizontal view, and the shapes between
+  // go from one to the other, so a square screen still shows the castle whole.
+  camera.fov = THREE.MathUtils.lerp(TALL_FOV, WIDE_FOV, THREE.MathUtils.smoothstep(camera.aspect, TALL_ASPECT, WIDE_ASPECT))
   camera.updateProjectionMatrix()
   shared.uPixel.value = (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2))) / (innerHeight * ratio)
   shared.uRef.value = (short * ratio) / REFERENCE_SHORT_SIDE
   hands.resize((innerWidth * REFERENCE_SHORT_SIDE) / short, (innerHeight * REFERENCE_SHORT_SIDE) / short)
 }
-addEventListener('resize', resize)
+addEventListener('resize', () => {
+  sharpness = 1
+  resize()
+})
 resize()
+
+const pace = { frames: 0, slow: 0 }
+/** Counts slow frames. When most of the last frames were slow, the picture is drawn with fewer pixels. */
+function keepPace(seconds: number) {
+  pace.frames++
+  if (seconds > SLOW_FRAME_SECONDS) pace.slow++
+  if (pace.frames < PACE_FRAMES) return
+  const short = Math.min(innerWidth, innerHeight)
+  const drawn = Math.min(picture.width, picture.height)
+  if (pace.slow > PACE_FRAMES / 2 && drawn > Math.min(short * devicePixelRatio, MIN_SHORT_SIDE_PIXELS)) {
+    sharpness *= PIXEL_STEP
+    resize()
+  }
+  pace.frames = 0
+  pace.slow = 0
+}
 
 // ---------- input ----------
 
@@ -316,9 +371,13 @@ Object.assign(window, { game: debug })
 let last = performance.now()
 function frame(now: number) {
   // the first rAF timestamp can be older than the page clock
-  const dt = THREE.MathUtils.clamp((now - last) / 1000, 0, MAX_FRAME_SECONDS)
+  const seconds = (now - last) / 1000
+  const dt = THREE.MathUtils.clamp(seconds, 0, MAX_FRAME_SECONDS)
   last = now
-  if (!debug.manual) advance(dt, now / 1000)
+  if (!debug.manual) {
+    keepPace(seconds)
+    advance(dt, now / 1000)
+  }
   requestAnimationFrame(frame)
 }
 requestAnimationFrame(frame)
