@@ -253,8 +253,11 @@ export function buildViewModel({ hearts: heartCount }: { hearts: number }) {
       sword.scale.setScalar(scale)
       for (const heart of hearts) heart.scale.setScalar(scale)
     },
+    /** Starts a swing of the sword. Returns false when one is under way already. */
     swing() {
-      if (swing < 0) swing = 0
+      if (swing >= 0) return false
+      swing = 0
+      return true
     },
     /**
      * bob: walk cycle phase, stride: 0..1 walk speed, turn: yaw speed in rad/s, rise: metres a second upward,

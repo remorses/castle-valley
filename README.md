@@ -17,6 +17,7 @@ pnpm dev
 | walk | `WASD` or arrows, `shift` runs | drag the left half |
 | jump | `space` | the JUMP button |
 | swing | click, `F` or `E` | tap the right half |
+| mute | `M` | |
 
 ## Creatures
 
@@ -26,6 +27,13 @@ Packs of **goblins** and a few **trolls** roam the meadows and the paths (`src/m
 - A swing of the sword strikes everything in reach before you. A goblin takes three blows, a troll nine.
 - You have five hearts. They show while you are hurt and come back when no blow has landed for a while.
 - Struck down, you start again at the forest and every creature is back at its home.
+
+## Sound
+
+Short, dry recordings in the manner of an old game (`src/audio.ts`, files in `public/audio`): steps on grass
+and on the path, the sword, the club, the cries of the creatures. Each play is pitched a little by chance, and
+a troll has a goblin's voice played slower. A creature is heard from where it stands: quieter with distance,
+and to the left or right. The wind is as loud as the gust that passes, and a song plays far under it all.
 
 ## How it looks painted
 

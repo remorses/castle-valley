@@ -1,7 +1,10 @@
 // Bootstrap: renderer, first-person controls, game loop.
 // Sizes on screen are set against the reference frame, which is 270 pixels on its short side.
 import * as THREE from 'three'
-import { bakeShade, shared } from './paint.ts'
+import { buildAudio } from './audio.ts'
+import type { SoundName } from './audio.ts'
+import type { MobEvent } from './mobs.ts'
+import { bakeShade, gustAt, shared } from './paint.ts'
 import { buildMobs } from './mobs.ts'
 import { buildViewModel } from './viewmodel.ts'
 import { BACKDROP, buildWorld, groundHeight, pushOut } from './world.ts'
@@ -47,6 +50,9 @@ const GRACE_SECONDS = 0.8
 // struck down, the player lies this long and then starts again at the forest
 const DOWN_SECONDS = 2.8
 const DOWN_EYE_HEIGHT = 0.4
+// what is heard of each thing a creature does. Snarls of one pack start up to ALERT_STAGGER_SECONDS apart
+const MOB_SOUNDS: Record<MobEvent['type'], SoundName> = { alert: 'goblinAlert', blow: 'club', hurt: 'goblinHurt', death: 'goblinDeath', idle: 'goblinIdle' }
+const ALERT_STAGGER_SECONDS = 0.35
 
 const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' })
 // colours are mixed as they should look on screen: nothing converts them
@@ -188,6 +194,7 @@ const flat = new THREE.Camera()
 const world = buildWorld()
 const mobs = buildMobs({ scene: world.scene, colliders: world.colliders, walkable: world.walkable })
 const hands = buildViewModel({ hearts: MAX_HEALTH })
+const audio = buildAudio()
 // the sun's shade over the part of the valley the player can walk
 bakeShade({ renderer, scene: world.scene, center: new THREE.Vector3(0, 0, -75), half: 260 })
 const camera = new THREE.PerspectiveCamera(70, 1, 0.25, 9000)
@@ -269,15 +276,24 @@ function look({ dx, dy, speed }: { dx: number; dy: number; speed: number }) {
   turnSpeed -= dx * speed * 30
 }
 
+/** the sword is swung, if the player stands and it is not in a swing already */
+function swing() {
+  if (player.down < 0 && hands.swing()) audio.play({ sound: 'swing' })
+}
+
+// a browser makes no sound before the player touches the page
+for (const type of ['keydown', 'pointerdown', 'pointerup'] as const) addEventListener(type, () => audio.unlock())
+
 addEventListener('keydown', (event) => {
   keys.add(event.code)
-  if (event.code === 'KeyF' || event.code === 'KeyE') hands.swing()
+  if (event.code === 'KeyF' || event.code === 'KeyE') swing()
+  if (event.code === 'KeyM') audio.toggleMute()
 })
 addEventListener('keyup', (event) => keys.delete(event.code))
 addEventListener('blur', () => keys.clear())
 
 canvas.addEventListener('mousedown', () => {
-  if (document.pointerLockElement === canvas) return hands.swing()
+  if (document.pointerLockElement === canvas) return swing()
   // Returns a promise only in newer browsers. A refused lock needs no handling: the next click asks again.
   void Promise.resolve(canvas.requestPointerLock?.()).catch(() => {})
 })
@@ -314,7 +330,7 @@ const endTouch = (event: PointerEvent) => {
   if (!touch) return
   touches.delete(event.pointerId)
   if (touch.move) stick.x = stick.y = 0
-  else if (touch.travelled < 8) hands.swing()
+  else if (touch.travelled < 8) swing()
 }
 canvas.addEventListener('pointerup', endTouch)
 canvas.addEventListener('pointercancel', endTouch)
@@ -347,6 +363,7 @@ function hurt(damage: number) {
   player.health = Math.max(0, player.health - damage)
   player.calm = 0
   player.blow = 1
+  audio.play({ sound: player.health > 0 ? 'hurt' : 'down' })
   if (player.health > 0) return
   player.down = 0
   player.grounded = true
@@ -373,6 +390,7 @@ function step(dt: number) {
   if (player.health < MAX_HEALTH && player.calm > HEAL_AFTER_SECONDS) {
     player.health++
     player.calm -= HEAL_SECONDS
+    audio.play({ sound: 'heal' })
   }
 
   const input = moveInput()
@@ -391,12 +409,14 @@ function step(dt: number) {
   if (world.walkable(next.x, player.z)) player.x = next.x
   if (world.walkable(player.x, next.z)) player.z = next.z
 
+  const footfall: SoundName = world.onPath(player.x, player.z) ? 'stepGravel' : 'stepGrass'
   const ground = groundHeight(player.x, player.z)
   if (player.grounded) {
     player.y = ground
     if (keys.has('Space') || jumpHeld) {
       player.vy = JUMP_SPEED
       player.grounded = false
+      audio.play({ sound: footfall, volume: 0.7, rate: 1.2 })
     }
   } else {
     player.vy -= GRAVITY * dt
@@ -404,6 +424,7 @@ function step(dt: number) {
     if (player.y <= ground) {
       player.grounded = true
       player.dip = LANDING_DIP * Math.min(1, -player.vy / JUMP_SPEED)
+      audio.play({ sound: 'land', volume: Math.min(1, -player.vy / JUMP_SPEED) })
       player.vy = 0
     }
   }
@@ -411,7 +432,10 @@ function step(dt: number) {
   // the feet make no steps in the air
   const moving = player.grounded ? Math.hypot(player.vx, player.vz) : 0
   player.stride += (Math.min(moving / WALK_SPEED, 1.4) - player.stride) * ease
+  // a foot comes down at every half turn of the walk cycle, louder at a run
+  const strides = Math.floor(player.bob / Math.PI)
   player.bob += moving * dt * 1.9
+  if (Math.floor(player.bob / Math.PI) !== strides) audio.play({ sound: footfall, volume: THREE.MathUtils.clamp(moving / RUN_SPEED, 0.5, 1) })
   if (moving > 0.5 && hint.style.opacity !== '0') hint.style.opacity = '0'
 }
 
@@ -446,10 +470,18 @@ const handsUpdate = (dt: number, time: number) =>
 
 function advance(dt: number, time: number) {
   step(dt)
-  const damage = mobs.update({ dt, time, prey: prey() })
+  audio.update({ x: player.x, z: player.z, yaw: player.yaw, gust: gustAt({ x: player.x, z: player.z, time }) })
+  const { damage, events } = mobs.update({ dt, time, prey: prey() })
   if (damage > 0 && player.down < 0 && player.calm > GRACE_SECONDS) hurt(damage)
   const { struck } = handsUpdate(dt, time)
-  if (struck && player.down < 0) mobs.strike({ x: player.x, z: player.z, yaw: player.yaw, ...SWORD })
+  if (struck && player.down < 0) {
+    const cries = mobs.strike({ x: player.x, z: player.z, yaw: player.yaw, ...SWORD })
+    if (cries.some((cry) => cry.type === 'hurt' || cry.type === 'death')) audio.play({ sound: 'hit' })
+    events.push(...cries)
+  }
+  for (const { type, x, z, voice } of events) {
+    audio.play({ sound: MOB_SOUNDS[type], rate: voice, at: { x, z }, delay: type === 'alert' ? Math.random() * ALERT_STAGGER_SECONDS : 0 })
+  }
   const darkest = player.down < 0 ? 0 : THREE.MathUtils.smoothstep(player.down, 0.6, 2)
   dark += (darkest - dark) * (1 - Math.exp(-dt * 6))
   render(time)
@@ -463,6 +495,7 @@ const debug = {
   scene: world.scene,
   mobs,
   hands,
+  audio,
   finish: finish.material.uniforms,
   manual: false,
   time: 3,

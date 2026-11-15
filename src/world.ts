@@ -1054,6 +1054,8 @@ export function buildWorld() {
     sky,
     colliders,
     walkable: (x: number, z: number) => reachOf(x, z) === 0,
+    /** true on the trodden earth of a path: steps sound different there */
+    onPath: (x: number, z: number) => zones.sample(x, z)[0] > 0.4,
     start: { x: EYE_START.x, z: EYE_START.z, yaw: 0, pitch: -0.05 },
     counts: { solid: canvas.solid.count, wood: canvas.wood.count, leaves: canvas.leaves.count, blades: canvas.blades.count, far: farDabs.count },
   }

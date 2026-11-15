@@ -268,6 +268,16 @@ float gustAt(vec2 xz) {
 }
 `
 
+/** The gusts of gustAt in the WIND chunk, for what is heard and not seen. Keep the two in step. */
+export function gustAt({ x, z, time }: { x: number; z: number; time: number }) {
+  const wind = shared.uWind.value
+  const along = x * wind.x + z * wind.y
+  const across = z * wind.x - x * wind.y
+  const band = Math.sin(along * 0.07 - time * 1.5 + 2 * Math.sin(across * 0.04))
+  const squall = Math.sin(along * 0.29 - time * 3.3 + across * 0.13)
+  return clamp(0.55 + 0.4 * band + 0.2 * squall, 0, 1)
+}
+
 // ---------- dabs ----------
 
 const DAB_VERTEX = /* glsl */ `

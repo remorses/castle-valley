@@ -35,11 +35,13 @@ interface MobKind {
   sight: number
   /** a blow of the sword stops what it was doing */
   reels: boolean
+  /** the pitch of its voice against a goblin's: a large creature has a low one */
+  voice: number
 }
 
 const KINDS = {
-  goblin: { scale: 1.2, skin: 'goblin', dressed: true, health: 3, stroll: 0.9, run: 4.3, radius: 0.4, reach: 1.7, damage: 1, sight: 17, reels: true },
-  troll: { scale: 1.9, skin: 'troll', dressed: false, health: 9, stroll: 0.7, run: 3, radius: 0.65, reach: 2.4, damage: 2, sight: 20, reels: false },
+  goblin: { scale: 1.2, skin: 'goblin', dressed: true, health: 3, stroll: 0.9, run: 4.3, radius: 0.4, reach: 1.7, damage: 1, sight: 17, reels: true, voice: 1 },
+  troll: { scale: 1.9, skin: 'troll', dressed: false, health: 9, stroll: 0.7, run: 3, radius: 0.65, reach: 2.4, damage: 2, sight: 20, reels: false, voice: 0.6 },
 } satisfies Record<string, MobKind>
 
 // Packs, in the meadows and on the paths: x, z, goblins, trolls. The first one waits in the forest behind the start.
@@ -80,6 +82,9 @@ const KNOCK_FADE = 7
 const BLOW_MARGIN = 0.6
 // a creature that is struck calls the roaming ones this near to the fight
 const ALARM_RADIUS = 16
+// a roaming creature this near the player grunts now and then: metres, and grunts a second
+const IDLE_HEARD = 26
+const IDLE_RATE = 0.07
 const DODGE_HEIGHT = 0.8
 
 // ---------- how they look ----------
@@ -314,6 +319,17 @@ interface Mob {
   materials: THREE.ShaderMaterial[]
 }
 
+/** Something a creature did that can be heard: it saw the player, swung its club, was struck, died, or grunted. */
+export interface MobEvent {
+  type: 'alert' | 'blow' | 'hurt' | 'death' | 'idle'
+  x: number
+  z: number
+  /** the pitch of the creature's voice */
+  voice: number
+}
+
+const eventOf = (mob: Mob, type: MobEvent['type']): MobEvent => ({ type, x: mob.x, z: mob.z, voice: mob.kind.voice })
+
 /** what a creature knows of the player */
 export interface Prey {
   x: number
@@ -325,7 +341,7 @@ export interface Prey {
 
 const UP = new THREE.Vector3(0, 1, 0)
 const slope = new THREE.Vector3()
-const STILL = { speed: 0, damage: 0 }
+const STILL: { speed: number; damage: number; event?: MobEvent['type'] } = { speed: 0, damage: 0 }
 
 /** the short way from one angle to another */
 const turnBetween = (from: number, to: number) => Math.atan2(Math.sin(to - from), Math.cos(to - from))
@@ -335,7 +351,10 @@ function enter(mob: Mob, stance: Stance) {
   mob.clock = 0
 }
 
-/** One step of a living creature's mind: may change its stance. Says where it wants to go and what its blow does. */
+/**
+ * One step of a living creature's mind: may change its stance. Says where it wants to go, what its blow does
+ * and what is heard of it.
+ */
 function think({ mob, prey, distance, rand }: { mob: Mob; prey: Prey; distance: number; rand: () => number }) {
   const { kind } = mob
   const toPrey = Math.atan2(prey.x - mob.x, prey.z - mob.z)
@@ -344,7 +363,7 @@ function think({ mob, prey, distance, rand }: { mob: Mob; prey: Prey; distance: 
   if (mob.stance === 'roam') {
     if (prey.alive && distance < kind.sight && strayed < LEASH - LEASH_SLACK) {
       enter(mob, 'chase')
-      return { heading: toPrey, ...STILL }
+      return { heading: toPrey, ...STILL, event: 'alert' as const }
     }
     // it strolls from spot to spot round its home and stands a while at each
     if (mob.clock > mob.rest) {
@@ -378,7 +397,7 @@ function think({ mob, prey, distance, rand }: { mob: Mob; prey: Prey; distance: 
     if (mob.clock < WINDUP_SECONDS) return { heading: toPrey, ...STILL }
     enter(mob, 'recover')
     const lands = prey.alive && distance < kind.reach + BLOW_MARGIN && prey.air < DODGE_HEIGHT
-    return { heading: mob.yaw, speed: 0, damage: lands ? kind.damage : 0 }
+    return { heading: mob.yaw, speed: 0, damage: lands ? kind.damage : 0, event: 'blow' as const }
   }
 
   if (mob.clock > (mob.stance === 'recover' ? RECOVER_SECONDS : REEL_SECONDS)) enter(mob, 'chase')
@@ -556,9 +575,10 @@ export function buildMobs({ scene, colliders, walkable }: { scene: THREE.Scene; 
     list: mobs,
     /** the living: they stand in the player's way */
     bodies: (): Collider[] => mobs.filter((mob) => mob.stance !== 'dead').map((mob) => ({ x: mob.x, z: mob.z, r: mob.kind.radius })),
-    /** Advances every creature by dt. Returns the hearts their blows take from the player. */
+    /** Advances every creature by dt. Returns the hearts their blows take from the player, and what is heard. */
     update({ dt, time, prey }: { dt: number; time: number; prey: Prey }) {
       let damage = 0
+      const events: MobEvent[] = []
       const seen: boolean[] = []
       for (const mob of mobs) {
         const distance = Math.hypot(prey.x - mob.x, prey.z - mob.z)
@@ -574,6 +594,8 @@ export function buildMobs({ scene, colliders, walkable }: { scene: THREE.Scene; 
         const wish = think({ mob, prey, distance, rand })
         // blows that land in the same frame count as the hardest one: a pack does not take every heart at once
         damage = Math.max(damage, wish.damage)
+        if (wish.event) events.push(eventOf(mob, wish.event))
+        else if (mob.stance === 'roam' && distance < IDLE_HEARD && rand() < IDLE_RATE * dt) events.push(eventOf(mob, 'idle'))
         move({ mob, heading: wish.heading, speed: wish.speed, prey, dt })
       }
       spread()
@@ -587,11 +609,14 @@ export function buildMobs({ scene, colliders, walkable }: { scene: THREE.Scene; 
       })
       mobs.forEach((mob, i) => pose({ mob, time, seen: seen[i] }))
       flecks.update(dt)
-      return damage
+      return { damage, events }
     },
-    /** The sword comes down: every creature within reach and inside the arc before the eye is struck. Returns how many. */
+    /**
+     * The sword comes down: every creature within reach and inside the arc before the eye is struck.
+     * Returns what is heard: a cry for each one struck, and the snarls of those it calls.
+     */
     strike({ x, z, yaw, reach, arc, damage }: { x: number; z: number; yaw: number; reach: number; arc: number; damage: number }) {
-      let struck = 0
+      const events: MobEvent[] = []
       for (const mob of mobs) {
         if (mob.stance === 'dead') continue
         const dx = mob.x - x
@@ -600,12 +625,12 @@ export function buildMobs({ scene, colliders, walkable }: { scene: THREE.Scene; 
         if (d > reach + mob.kind.radius) continue
         // the player looks along (-sin yaw, -cos yaw)
         if (Math.abs(turnBetween(yaw, Math.atan2(-dx, -dz))) > arc) continue
-        struck++
         mob.health -= damage
         mob.flash = 1
         mob.pushX = ((dx / d) * KNOCK_SPEED) / mob.kind.scale
         mob.pushZ = ((dz / d) * KNOCK_SPEED) / mob.kind.scale
         const dead = mob.health <= 0
+        events.push(eventOf(mob, dead ? 'death' : 'hurt'))
         flecks.burst({
           at: [mob.x, groundHeight(mob.x, mob.z) + 0.75 * mob.kind.scale, mob.z],
           awayX: dx / d,
@@ -619,10 +644,12 @@ export function buildMobs({ scene, colliders, walkable }: { scene: THREE.Scene; 
           enter(mob, 'dead')
         } else if (mob.kind.reels) enter(mob, 'reel')
         for (const other of mobs) {
-          if (other.stance === 'roam' && Math.hypot(other.x - mob.x, other.z - mob.z) < ALARM_RADIUS) enter(other, 'chase')
+          if (other.stance !== 'roam' || Math.hypot(other.x - mob.x, other.z - mob.z) > ALARM_RADIUS) continue
+          enter(other, 'chase')
+          events.push(eventOf(other, 'alert'))
         }
       }
-      return struck
+      return events
     },
     /** every creature alive again and at its home */
     reset: () => mobs.forEach(revive),

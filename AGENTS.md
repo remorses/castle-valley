@@ -29,6 +29,9 @@ src/main.ts ───────▶ renderer, input, player step (walk, jump, h
    ├──▶ src/mobs.ts ────── buildMobs(): goblins and trolls in camps (CAMPS). update() ──▶ think (stance: roam,
    │                       chase, windup, recover, reel, dead) ──▶ move ──▶ pose. strike(): the sword lands
    │
+   ├──▶ src/audio.ts ───── buildAudio(): samples from public/audio through the Web Audio API, wind and torch
+   │                       loops, the song. play({ sound, at }) is quieter with distance and panned
+   │
    └──▶ src/viewmodel.ts ─ hands as pixel sprites (torch, sword), flame wobble, sparks, hearts: own scene with
                            an orthographic camera in reference pixels, drawn after the world
 ```
@@ -38,6 +41,7 @@ One frame (`advance` in `main.ts`):
 ```
 step(dt) ──▶ mobs.update() ──▶ hearts their blows take ──▶ hurt()      (not within GRACE_SECONDS of the last blow)
          ──▶ hands.update() ─▶ struck: the blade lands ──▶ mobs.strike() ──▶ flash, knock back, flecks, death
+         ──▶ MobEvent[] from both ──▶ audio.play()        (MOB_SOUNDS maps what a creature did to a sound)
          ──▶ render()
 ```
 
@@ -97,6 +101,10 @@ The painter follows https://patch.gg/blendi/oil-paint (source: `~/Documents/GitH
   strokes and normals with `modelMatrix`. Paint a moving thing with a light that does not depend on where it
   faces (`lightOf: fromAbove`): the baked sun would turn with it. Never scale a creature's group: dab sizes
   are in metres and do not follow the matrix. Build a larger kind instead (`scale` in `KINDS`).
+- **Sound** (`audio.ts`): nothing exists before the player touches the page (`unlock`). Add a sound as a WAV
+  (mono, 22050 Hz, 16-bit) in `public/audio`, a line in its `CREDITS.md` and an entry in `SOUNDS`. Only CC0
+  recordings. Loops must be cut seamless. The game only says what happened (`audio.play`); loudness, takes
+  and pitch are in `audio.ts`. The gusts heard are the gusts seen: `gustAt` in `paint.ts` mirrors the shader.
 - **Game state** is in `player` (`main.ts`) and in each `Mob`. Events between them are return values:
   `mobs.update()` returns the damage dealt, `hands.update()` returns `struck`. `window.game.mobs.list` shows them.
 - Per-frame work is the player step, the creatures, the sparks and two render calls. `window.game.counts` shows the dab counts.
