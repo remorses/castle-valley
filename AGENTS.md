@@ -31,18 +31,25 @@ The painter follows https://patch.gg/blendi/oil-paint (source: `~/Documents/GitH
 
 - **Everything visible is a dab or an under mesh.** No lights. The look must stay pinned to the world: never add
   an effect that reads neighbouring pixels or depends on the place on screen (pixel grids, blurs, outlines).
-- **The grade** (`main.ts`) is the one pass over the picture. The world is drawn into a render target (4 samples)
-  and graded pixel by pixel: shade toward violet, light toward warm, a lift in the darks, varnish. The palette
-  is saturated on purpose and the grade holds it together. The hands are drawn after it, ungraded.
+- **The finish** (`main.ts`) is the one pass over the picture. The world is drawn into a render target (4 samples)
+  and finished pixel by pixel: the grade (shade toward violet, light toward warm, a lift in the darks), then the
+  weave of the canvas, a rolloff of the brightest paint, and varnish. The palette is saturated on purpose and
+  the grade holds it together. The hands are drawn after it, unfinished.
 - **Dabs** are instanced cards that show one mark of the brush sheet. `face` dabs turn to the eye and run along
   `dir` on the canvas. `lie` dabs lie on a surface and are stood up when seen edge on. Edges are cut with
   alpha to coverage, so the render target needs its samples.
-- **Colours are baked** when the world is built. The shader only breaks each colour a little (`jitter`), streaks
-  a lighter one into it, and rakes a light across the paint (`uImpasto`).
+- **Colours are baked** when the world is built. The shader breaks each colour a little (`jitter`), streaks a
+  lighter one into it, and rakes a light across the paint (`uImpasto`).
+- **Sun and shade** (`bakeShade` in `paint.ts`): the depth of the valley's under meshes is drawn once from the
+  sun. Each dab asks it for its own spot and takes sun or shade whole, so a shadow's edge is a ragged line of
+  whole dabs. Meshes that should cast shade need `layers.enable(CASTER_LAYER)`.
+- **Mist** is by true distance from the eye, per dab (`hazed`). Never bake haze into colours.
+- **The `far` canvas** (castle, crag, mountains, mist banks, cloud veil) takes no shade and no mist: those things
+  are painted in their own airy colours.
 - **A mark fills about half of its card.** Solid things are covered several times over (`cover` in `SolidStyle`).
   A crown hides its under blob with lobes of leaves and two dark dabs behind each lobe.
-- **Dabs are kept in four meshes by how they behave** (`LIMITS` in `world.ts`): least and largest size on
-  screen in reference pixels (270 on the short side), and sway.
+- **Dabs are kept in a few meshes by how they behave** (`KINDS` in `world.ts`): least and largest size on
+  screen in reference pixels (270 on the short side), sway, broken colour, shade and mist.
 - **Far dabs:** each dab has a fixed rank. Past the distance where it would be smaller than its least size, only
   the low ranks stay and grow. The vertex shader uses true distance, so turning the head changes nothing.
 - **How fine a thing is painted** depends on how near the player can come (`reachOf` in `world.ts`).

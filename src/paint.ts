@@ -123,12 +123,15 @@ export function mixColor(a: RGB, b: RGB, t: number): RGB {
   return [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)]
 }
 
-/** the colour of a ramp for t in 0..1, dark to light, mixed between its two nearest tones */
+/**
+ * The colour of a ramp for t in 0..1, dark to light. A dab is one mix or the next, seldom between: the edge
+ * between two mixes is narrow, so with a little chance in t one zone breaks into the next dab by dab.
+ */
 export function tone(name: RampName, t: number): RGB {
   const ramp = RAMPS[name]
   const f = clamp(t * TONES - 0.5, 0, TONES - 1)
   const i = Math.min(TONES - 2, Math.floor(f))
-  return mixColor(ramp[i], ramp[i + 1], f - i)
+  return mixColor(ramp[i], ramp[i + 1], smooth(0.3, 0.7, f - i))
 }
 
 export const LIGHT_DIR = new THREE.Vector3(-0.55, 0.75, 0.35).normalize()
@@ -136,7 +139,9 @@ export const LIGHT_DIR = new THREE.Vector3(-0.55, 0.75, 0.35).normalize()
 /** how lit a surface with this normal is, 0..1 */
 export const lightOn = (nx: number, ny: number, nz: number) => (nx * LIGHT_DIR.x + ny * LIGHT_DIR.y + nz * LIGHT_DIR.z) * 0.5 + 0.5
 
-/** Uniforms shared by every dab mesh. uPixel and uRef are set on resize. */
+const tShade: { value: THREE.Texture | null } = { value: null }
+
+/** Uniforms shared by every painted material. uPixel and uRef are set on resize, the shade by bakeShade. */
 export const shared = {
   uTime: { value: 0 },
   // world size of one screen pixel at distance 1
@@ -144,8 +149,90 @@ export const shared = {
   // screen pixels in one pixel of the reference frame: dab sizes on screen are given in reference pixels
   uRef: { value: 4 },
   // how strongly the light rakes across the thick paint
-  uImpasto: { value: 1.1 },
+  uImpasto: { value: 1 },
   tBrush: { value: createBrushSheet() },
+  // where the sun reaches: a picture of the still world's depth as the sun sees it
+  tShade,
+  uShadeMatrix: { value: new THREE.Matrix4() },
+  uSunDir: { value: LIGHT_DIR },
+  // paint in the shade is the paint times uShadeMul plus uShadeAdd: darker and toward plum. In the sun it is warmer
+  uShadeMul: { value: new THREE.Vector3(0.6, 0.62, 0.8) },
+  uShadeAdd: { value: new THREE.Vector3(0.012, 0.008, 0.03) },
+  uSunMul: { value: new THREE.Vector3(1.08, 1.03, 0.9) },
+  // mist between the eye and a thing: its colour, how fast it thickens with distance, and the most of it
+  uHaze: { value: new THREE.Vector3(...hex('#1a2946')) },
+  uHazeDensity: { value: 0.0018 },
+  uHazeMost: { value: 0.75 },
+}
+
+// Sun, shade and mist, for dabs and underpainting alike.
+const AIR = /* glsl */ `
+uniform sampler2D tShade;
+uniform mat4 uShadeMatrix;
+uniform vec3 uSunDir;
+uniform vec3 uShadeMul;
+uniform vec3 uShadeAdd;
+uniform vec3 uSunMul;
+uniform vec3 uHaze;
+uniform float uHazeDensity;
+uniform float uHazeMost;
+uniform float uTakeShade;
+uniform float uMist;
+
+// 1 in the sun, 0 in the shade of the still world. That shade never moves, so a dab can take it whole.
+float sunAt(vec3 world) {
+  // asked a little toward the sun, so a thing is not in its own shade
+  vec4 t = uShadeMatrix * vec4(world + uSunDir * 0.6, 1.0);
+  if (t.x <= 0.0 || t.x >= 1.0 || t.y <= 0.0 || t.y >= 1.0 || t.z >= 1.0) return 1.0;
+  return step(t.z - 0.0003, texture2D(tShade, t.xy).r);
+}
+vec3 lit(vec3 c, vec3 world) {
+  float sun = mix(1.0 - uTakeShade, 1.0, sunAt(world));
+  // what takes no shade is painted in its own colours and is left as it is
+  return mix(c * uShadeMul + uShadeAdd, c * mix(vec3(1.0), uSunMul, uTakeShade), sun);
+}
+// Mist puts distance between one row of things and the next. By true distance: turning the head changes nothing.
+vec3 hazed(vec3 c, vec3 world) {
+  return mix(c, uHaze, uMist * min(uHazeMost, 1.0 - exp(-distance(world, cameraPosition) * uHazeDensity)));
+}
+`
+
+/** How a group of things takes the sun's shade and the mist. */
+export interface Air {
+  /** how much of the shade it takes, 0..1. Leaves take half: light comes down through the leaves above */
+  shade?: number
+  /** false for far things painted in their own airy colours, and for the sky */
+  mist?: boolean
+}
+
+const airUniforms = ({ shade = 1, mist = true }: Air) => ({ uTakeShade: { value: shade }, uMist: { value: mist ? 1 : 0 } })
+
+const SHADE_SIZE = 4096
+export const CASTER_LAYER = 1
+// turns clip space, -1..1, into the 0..1 of a texture and its depth
+const TO_TEXTURE = new THREE.Matrix4().set(0.5, 0, 0, 0.5, 0, 0.5, 0, 0.5, 0, 0, 0.5, 0.5, 0, 0, 0, 1)
+
+/**
+ * Draws the still world's shade once, from the sun: the depth of every mesh on CASTER_LAYER, in a square of
+ * `half` metres each way round `center`. Every dab then asks it whether its spot is in the sun.
+ */
+export function bakeShade({ renderer, scene, center, half }: { renderer: THREE.WebGLRenderer; scene: THREE.Scene; center: THREE.Vector3; half: number }) {
+  const target = new THREE.WebGLRenderTarget(SHADE_SIZE, SHADE_SIZE, { depthBuffer: true, generateMipmaps: false })
+  target.depthTexture = new THREE.DepthTexture(SHADE_SIZE, SHADE_SIZE, THREE.UnsignedIntType)
+  const back = half * 2
+  const sun = new THREE.OrthographicCamera(-half, half, half, -half, 1, back * 2)
+  sun.position.copy(center).addScaledVector(LIGHT_DIR, back)
+  sun.lookAt(center)
+  sun.updateMatrixWorld(true)
+  sun.layers.set(CASTER_LAYER)
+  scene.overrideMaterial = new THREE.MeshBasicMaterial({ side: THREE.DoubleSide })
+  renderer.setRenderTarget(target)
+  renderer.clear()
+  renderer.render(scene, sun)
+  renderer.setRenderTarget(null)
+  scene.overrideMaterial = null
+  shared.tShade.value = target.depthTexture
+  shared.uShadeMatrix.value.copy(TO_TEXTURE).multiply(sun.projectionMatrix).multiply(sun.matrixWorldInverse)
 }
 
 // ---------- dabs ----------
@@ -161,6 +248,7 @@ uniform float uRef;
 uniform float uTime;
 uniform float uSway;
 uniform float uSalt;
+uniform float uJitter;
 uniform vec2 uMin;
 uniform vec2 uMax;
 varying vec2 vUv;
@@ -168,7 +256,7 @@ varying vec3 vC1;
 varying vec3 vC2;
 varying vec4 vAxis;
 const float TAU = 6.28318530718;
-
+${AIR}
 vec4 hash4(float n) {
   vec4 q = fract(vec4(n) * vec4(0.1031, 0.1030, 0.0973, 0.1099));
   q += dot(q, q.wzxy + 33.33);
@@ -202,7 +290,8 @@ void main() {
     if (foot > 0.5) dir += wind * 3.0;
     else pinned += wind;
   }
-  vec4 vc = viewMatrix * modelMatrix * vec4(pinned, 1.0);
+  vec4 world = modelMatrix * vec4(pinned, 1.0);
+  vec4 vc = viewMatrix * world;
   float depth = -vc.z;
   if (depth < 0.08) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
   // true distance, not depth: turning the head must not change any dab
@@ -264,8 +353,10 @@ void main() {
   float end_ = foot < 0.5 && fract(r.x * 7.13) > 0.5 ? -1.0 : 1.0;
   vec2 q = vec2(position.x * flip, position.y * end_) * 0.5 + 0.5;
   vUv = (vec2(mod(cell, ${BRUSH_COLUMNS}.0), floor(cell / ${BRUSH_COLUMNS}.0)) + q) / vec2(${BRUSH_COLUMNS}.0, ${BRUSH_ROWS}.0);
-  vC1 = jitter(aColor.rgb, r.yzw, 0.4);
-  vC2 = jitter(vC1 * 1.22 + 0.012, r.wxy, 0.5);
+  // the dab takes sun or shade whole, so a shadow's edge is a ragged line of whole dabs
+  vec3 c = jitter(lit(aColor.rgb, world.xyz), r.yzw, uJitter);
+  vC1 = hazed(c, world.xyz);
+  vC2 = hazed(jitter(c * 1.22 + 0.012, r.wxy, uJitter * 1.2), world.xyz);
   vAxis = vec4(across * flip, along * end_);
 }
 `
@@ -289,8 +380,7 @@ void main() {
   vec3 col = mix(vC1, vC2, smoothstep(0.52, 0.78, t.b));
   col *= mix(0.95, 1.04, t.r);
   col *= 1.0 + rake * 1.25 * uImpasto;
-  // the glint on a ridge of paint: none on dark paint, or the shade would glitter
-  col += vec3(1.0, 0.97, 0.9) * pow(max(rake, 0.0), 2.0) * uImpasto * 2.4 * dot(col, vec3(0.3, 0.59, 0.11));
+  col += vec3(1.0, 0.97, 0.9) * pow(max(rake, 0.0), 2.0) * 1.2 * uImpasto;
   gl_FragColor = vec4(col, smoothstep(0.3, 0.62, t.g));
 }
 `
@@ -334,13 +424,16 @@ export interface LyingDab {
   marks?: number
 }
 
-export interface DabLimits {
+/** How the dabs of one mesh behave. */
+export interface DabKind extends Air {
   /** least size on screen, across and along, in reference pixels */
   min: [number, number]
   /** largest size on screen: for things the player can walk into */
   max?: [number, number]
   /** metres of wind movement */
   sway?: number
+  /** broken colour: how differently each dab is mixed from its neighbours */
+  jitter?: number
 }
 
 const INITIAL_DABS = 1 << 14
@@ -407,7 +500,7 @@ export class Dabs {
     this.normal.set([dab.normal[0] * 127, dab.normal[1] * 127, dab.normal[2] * 127, 127], i * 4)
   }
 
-  build({ min, max = [0, 0], sway = 0 }: DabLimits) {
+  build({ min, max = [0, 0], sway = 0, jitter = 0.5, ...air }: DabKind) {
     const geometry = new THREE.InstancedBufferGeometry()
     geometry.setAttribute('position', new THREE.Float32BufferAttribute([-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0], 3))
     geometry.setIndex([0, 1, 2, 0, 2, 3])
@@ -424,6 +517,8 @@ export class Dabs {
         uMin: { value: new THREE.Vector2(...min) },
         uMax: { value: new THREE.Vector2(...max) },
         uSway: { value: sway },
+        uJitter: { value: jitter },
+        ...airUniforms(air),
         // so two meshes do not lay the same run of marks
         uSalt: { value: 5.1 + 77.7 * meshes++ },
       },
@@ -445,20 +540,25 @@ export class Dabs {
 const UNDER_VERTEX = /* glsl */ `
 attribute vec3 aColor;
 varying vec3 vColor;
+varying vec3 vWorld;
 void main() {
   vColor = aColor;
-  gl_Position = projectionMatrix * viewMatrix * modelMatrix * vec4(position, 1.0);
+  vec4 world = modelMatrix * vec4(position, 1.0);
+  vWorld = world.xyz;
+  gl_Position = projectionMatrix * viewMatrix * world;
 }
 `
 
 const UNDER_FRAGMENT = /* glsl */ `
 varying vec3 vColor;
-void main() { gl_FragColor = vec4(vColor, 1.0); }
+varying vec3 vWorld;
+${AIR}
+void main() { gl_FragColor = vec4(hazed(lit(vColor, vWorld), vWorld), 1.0); }
 `
 
-/** flat colour per vertex, from the `aColor` attribute */
-export function underMaterial() {
-  return new THREE.ShaderMaterial({ vertexShader: UNDER_VERTEX, fragmentShader: UNDER_FRAGMENT, side: THREE.DoubleSide })
+/** flat colour per vertex, from the `aColor` attribute, in the sun's shade and the mist like the dabs over it */
+export function underMaterial(air: Air = {}) {
+  return new THREE.ShaderMaterial({ uniforms: { ...shared, ...airUniforms(air) }, vertexShader: UNDER_VERTEX, fragmentShader: UNDER_FRAGMENT, side: THREE.DoubleSide })
 }
 
 /** Collects coloured triangles and builds one mesh from them. */
@@ -472,7 +572,7 @@ export class Under {
     this.length += position.length
   }
 
-  build() {
+  build(air: Air = {}) {
     const position = new Float32Array(this.length)
     const color = new Float32Array(this.length)
     let offset = 0
@@ -484,7 +584,7 @@ export class Under {
     const geometry = new THREE.BufferGeometry()
     geometry.setAttribute('position', new THREE.BufferAttribute(position, 3))
     geometry.setAttribute('aColor', new THREE.BufferAttribute(color, 3))
-    const mesh = new THREE.Mesh(geometry, underMaterial())
+    const mesh = new THREE.Mesh(geometry, underMaterial(air))
     mesh.frustumCulled = false
     return mesh
   }

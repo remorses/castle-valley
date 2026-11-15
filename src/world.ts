@@ -11,8 +11,8 @@
 //   forest edge ....... z 0
 //   start ............. z 14
 import * as THREE from 'three'
-import { Dabs, MARKS, Under, billow, clamp, fbm, hex, lerp, lightOn, mixColor, mulberry, noise, ridged, smooth, tone, underMaterial } from './paint.ts'
-import type { DabLimits, RGB, Vec3 } from './paint.ts'
+import { CASTER_LAYER, Dabs, MARKS, Under, billow, clamp, fbm, hex, lerp, lightOn, mixColor, mulberry, noise, ridged, smooth, tone, underMaterial } from './paint.ts'
+import type { DabKind, RGB, Vec3 } from './paint.ts'
 import { paintCrown, paintFir, paintSolid, paintTrunk, paintTuft } from './things.ts'
 import type { Canvas, CrownStyle, SolidStyle, Tone, TrunkStyle } from './things.ts'
 
@@ -253,19 +253,12 @@ function buildPathDistance() {
 
 // ---------- colours by place ----------
 
-const HAZE = hex('#1a2946')
 const MIST = hex('#39396a')
 const JOINT = hex('#3e2f1b')
 const FLOWER = hex('#b24300')
 
 /** what shows where no dab reaches: the mist below the horizon */
 export const BACKDROP = hex('#29285a')
-
-/** Far things fade into blue haze. Measured from the middle of the valley, so it is fixed in the world. */
-function haze(color: RGB, [x, , z]: Vec3): RGB {
-  const k = clamp((Math.hypot(x, z + 40) - 70) / 240, 0, 1) * 0.55
-  return k > 0 ? mixColor(color, HAZE, k) : color
-}
 
 /** mist that rises to about `top` metres, give or take `feather`, and swallows what stands in it */
 const mistBelow =
@@ -351,7 +344,7 @@ function buildSky(rand: () => number) {
   }
   dome.setAttribute('aColor', new THREE.BufferAttribute(color, 3))
   const sky = new THREE.Group()
-  sky.add(new THREE.Mesh(dome, underMaterial()), dabs.build(LIMITS.sky))
+  sky.add(new THREE.Mesh(dome, underMaterial(KINDS.sky)), dabs.build(KINDS.sky))
   for (const mesh of sky.children) {
     mesh.frustumCulled = false
     mesh.renderOrder = -10
@@ -381,7 +374,7 @@ const GROUND_BLOCK = 4
 const TUFT_REACH = 14
 const TUFT_STEP = 0.7
 
-const GRASS_TUFT: Tone = { ramp: 'grass', base: 0.12, light: 0.95, noise: 0.5, tint: haze }
+const GRASS_TUFT: Tone = { ramp: 'grass', base: 0.12, light: 0.95, noise: 0.5 }
 const FERN_TUFT: Tone = { ramp: 'forestFloor', base: 0.42, light: 0.6, noise: 0.5 }
 
 /** The ground: its under mesh goes into the scene, its strokes and its grass onto the canvas. */
@@ -410,7 +403,7 @@ function buildGround({ canvas, zones, pathDistance }: { canvas: Canvas; zones: R
     return [-dx / length, 2.5 / length, -dz / length]
   }
   // deep in the forest at the start everything is darker
-  const duskAt = (z: number) => smooth(3, 17, z)
+  const duskAt = (z: number) => 0.5 * smooth(3, 17, z)
 
   interface Spot {
     x: number
@@ -426,7 +419,6 @@ function buildGround({ canvas, zones, pathDistance }: { canvas: Canvas; zones: R
   /** what a stroke at a spot is painted with, and whether the spot is on a path */
   const paintAt = ({ x, z, d, light, spread, edge, pick }: Spot): { color: RGB; path: boolean } => {
     const [, open, forest] = zones.sample(x, z)
-    const at: Vec3 = [x, 0, z]
     const dusk = duskAt(z)
     // the path is a cart track at the start and a footpath in the valley
     const half = lerp(0.5, 0.8, smooth(-60, 10, z))
@@ -436,13 +428,13 @@ function buildGround({ canvas, zones, pathDistance }: { canvas: Canvas; zones: R
       if (pick > 0.965) return { color: tone('grass', 0.3 + spread * 0.4), path: true }
       const patch = fbm(x * 1.3 + 7, z * 0.9 + 3, 3) - 0.44
       const earth = tone('path', 0.5 + patch * 1.5 + (spread - 0.5) * 0.3 - dusk * 0.3)
-      return { color: haze(mixColor(earth, tone('forestFloor', 0.6), dusk * 0.55), at), path: true }
+      return { color: mixColor(earth, tone('forestFloor', 0.6), dusk * 0.55), path: true }
     }
     const shade = forest * (1 - smooth(0.1, 0.32, open))
     const t = -0.06 + (light - 0.5) * 1.1 + open * 0.8 + (fbm(x * 0.045, z * 0.045) - 0.5) * 0.55 + (spread - 0.5) * 0.7 - dusk * 0.42
-    if (shade + (edge - 0.5) * 0.3 > 0.5) return { color: haze(tone('forestFloor', t * 0.9 + 0.22 - shade * 0.25), at), path: false }
+    if (shade + (edge - 0.5) * 0.3 > 0.5) return { color: tone('forestFloor', t * 0.9 + 0.22 - shade * 0.25), path: false }
     if (pick > 0.994 && open > 0.1) return { color: FLOWER, path: false }
-    return { color: haze(tone('grass', t + 0.12), at), path: false }
+    return { color: tone('grass', t + 0.12), path: false }
   }
 
   // under mesh
@@ -470,6 +462,7 @@ function buildGround({ canvas, zones, pathDistance }: { canvas: Canvas; zones: R
   geometry.setIndex(new THREE.BufferAttribute(index, 1))
   const mesh = new THREE.Mesh(geometry, underMaterial())
   mesh.frustumCulled = false
+  mesh.layers.enable(CASTER_LAYER)
 
   /** the way a path runs at a spot beside it: across the slope of the distance to it */
   const pathDirection = (x: number, z: number): Vec3 => {
@@ -567,13 +560,15 @@ const reachOf = (x: number, z: number) => Math.max(0, Math.abs(x) - (valleyHalfW
 
 // ---------- how each kind of thing is painted ----------
 
-// Least and largest size of a dab on screen, in pixels of the reference frame, by how the dabs behave.
-const LIMITS: Record<'solid' | 'wood' | 'leaves' | 'blades' | 'sky', DabLimits> = {
-  solid: { min: [1.2, 2.2] },
-  wood: { min: [0.8, 2], max: [60, 220] },
-  leaves: { min: [1.25, 2], max: [55, 90], sway: 0.04 },
-  blades: { min: [0.6, 3], max: [20, 160], sway: 0.02 },
-  sky: { min: [1.6, 3] },
+// How the dabs of each mesh behave. Sizes on screen are in pixels of the reference frame.
+// `far` holds what stands beyond the valley: it is painted in its own airy colours and takes no mist or shade.
+const KINDS: Record<'solid' | 'wood' | 'leaves' | 'blades' | 'far' | 'sky', DabKind> = {
+  solid: { min: [1.2, 2.2], jitter: 0.45 },
+  wood: { min: [0.8, 2], max: [30, 125], jitter: 0.6 },
+  leaves: { min: [1.25, 2], max: [36, 56], sway: 0.04, jitter: 0.55, shade: 0.5 },
+  blades: { min: [0.6, 3], max: [15, 105], sway: 0.02, jitter: 0.55 },
+  far: { min: [1.2, 2.2], jitter: 0.35, shade: 0, mist: false },
+  sky: { min: [1.6, 3], jitter: 0.2, shade: 0, mist: false },
 }
 
 const BARK: TrunkStyle = { ramp: 'bark', base: 0.2, light: 0.85, noise: 0.7, moss: { ramp: 'forestFloor', base: 0.4, light: 0.6, noise: 0.4 } }
@@ -591,13 +586,13 @@ const FLOWERS = { colors: [hex('#a5b5a0'), hex('#798c78')], chance: 0.12 }
 const SHRUB: Tone = { ramp: 'bushy', base: 0.12, light: 0.8, noise: 0.45, clump: [0.4, 0.8] }
 const HERO_BUSH: CrownStyle = { ...SHRUB, lobe: [0.35, 0.6], leaves: 60, touch: 0.3 }
 const WILD_BUSH: CrownStyle = { ...SHRUB, lobe: [0.4, 0.7], leaves: 40, touch: 0.34 }
-const VALLEY_BUSH: CrownStyle = { ...SHRUB, tint: haze, lobe: [0.55, 0.9], leaves: 32, touch: 0.38 }
-const LEAFY: CrownStyle = { ramp: 'bushy', base: 0.02, light: 0.85, noise: 0.4, clump: [0.5, 1.4], tint: haze, lobe: [0.6, 0.9], leaves: 56, touch: 0.28 }
-const FIR: Tone = { ramp: 'conifer', base: 0.06, light: 0.62, noise: 0.4, tint: haze }
+const VALLEY_BUSH: CrownStyle = { ...SHRUB, lobe: [0.55, 0.9], leaves: 32, touch: 0.38 }
+const LEAFY: CrownStyle = { ramp: 'bushy', base: 0.02, light: 0.85, noise: 0.4, clump: [0.5, 1.4], lobe: [0.6, 0.9], leaves: 56, touch: 0.28 }
+const FIR: Tone = { ramp: 'conifer', base: 0.06, light: 0.62, noise: 0.4 }
 
-const WALL: SolidStyle = { ramp: 'wall', base: -0.06, light: 0.92, noise: 0.6, clump: [0.3, 1.5], tint: haze, stroke: [0.3, 0.85], grain: 'level', cover: 9 }
-const ROOF: SolidStyle = { ramp: 'roof', base: -0.06, light: 0.92, noise: 0.6, tint: haze, stroke: [0.32, 0.9], cover: 9 }
-const TIMBER: SolidStyle = { ramp: 'bark', base: 0.3, light: 0.5, noise: 0.3, tint: haze, stroke: [0.12, 0.5] }
+const WALL: SolidStyle = { ramp: 'wall', base: -0.06, light: 0.92, noise: 0.6, clump: [0.3, 1.5], stroke: [0.3, 0.85], grain: 'level', cover: 9 }
+const ROOF: SolidStyle = { ramp: 'roof', base: -0.06, light: 0.92, noise: 0.6, stroke: [0.32, 0.9], cover: 9 }
+const TIMBER: SolidStyle = { ramp: 'bark', base: 0.3, light: 0.5, noise: 0.3, stroke: [0.12, 0.5] }
 const CASTLE: SolidStyle = { ramp: 'castle', base: -0.02, light: 0.9, noise: 0.45, clump: [0.3, 40], stroke: [2.2, 5.5] }
 const CASTLE_ROUND: SolidStyle = { ...CASTLE, smooth: true }
 const CRAG_MIST = mistBelow({ top: -30, feather: 30, most: 1 })
@@ -615,6 +610,9 @@ export function buildWorld() {
   const rand = mulberry(20260715)
   const range = (a: number, b: number) => lerp(a, b, rand())
   const canvas: Canvas = { under: new Under(), solid: new Dabs(), wood: new Dabs(), leaves: new Dabs(), blades: new Dabs(), rand }
+  // what stands beyond the valley is painted on a canvas of its own
+  const farDabs = new Dabs()
+  const far: Canvas = { ...canvas, under: new Under(), solid: farDabs, wood: farDabs }
 
   const sky = buildSky(rand)
   scene.add(sky)
@@ -657,7 +655,7 @@ export function buildWorld() {
     [10, 25, 2, 6, 5, 5.5], [10.5, 5, 4, 3.2, 3.6, 3], [3.9, 3.2, 5, 1.9, 2.2, 1.9], [4.7, 7.6, 3, 2.6, 2.6, 2.6],
     [-4.3, 4.6, 4, 2.2, 2.8, 2.2],
   ]
-  for (const [x, y, z, rx, ry, rz] of heroCrowns) paintCrown(canvas, { center: [x, groundHeight(x, z) + y, z], radius: [rx, ry, rz], style: CROWN.near, bias: -0.15 })
+  for (const [x, y, z, rx, ry, rz] of heroCrowns) paintCrown(canvas, { center: [x, groundHeight(x, z) + y, z], radius: [rx, ry, rz], style: CROWN.near })
 
   const treeSpots: Point[] = []
   for (let i = 0; i < 2600; i++) {
@@ -690,7 +688,7 @@ export function buildWorld() {
     [5.6, 8, 2, false], [1.8, 12, 0.7, false], [-1.8, 12.1, 0.7, true], [-4.4, -6, 1.3, false], [-5.6, -9.5, 1.6, false],
     [5, -9, 1.4, false],
   ]
-  for (const [x, z, size, flowers] of heroBushes) bush({ x, z, size, style: flowers ? { ...HERO_BUSH, accent: FLOWERS } : HERO_BUSH, bias: z > 0 ? -0.4 : -0.2 })
+  for (const [x, z, size, flowers] of heroBushes) bush({ x, z, size, style: flowers ? { ...HERO_BUSH, accent: FLOWERS } : HERO_BUSH, bias: z > 0 ? -0.25 : -0.15 })
   for (let i = 0; i < 160; i++) {
     const z = range(-63, 60)
     const side = rand() < 0.5 ? -1 : 1
@@ -834,7 +832,7 @@ export function buildWorld() {
     const rock = new THREE.BufferGeometry()
     rock.setAttribute('position', new THREE.Float32BufferAttribute(position, 3))
     rock.setIndex(index)
-    paintSolid(canvas, { geometry: rock, style: CRAG_ROCK })
+    paintSolid(far, { geometry: rock, style: CRAG_ROCK })
 
     // castle. Sizes read from the reference frame: 1 unit is 1.167 m, heights are from the castle's foot
     const k = 1.167
@@ -843,12 +841,12 @@ export function buildWorld() {
     const buried = -110
     const lightWindow = ([x, y, z]: Vec3) => {
       const color = hex(rand() < 0.6 ? '#b24300' : '#d66a00')
-      canvas.solid.face({ at: [CRAG.x + x, y, CRAG.z + z], dir: [0, 1, 0], size: [2.2, 2.8], color, marks: MARKS.pressed, lift: 0.2, pinned: true })
+      farDabs.face({ at: [CRAG.x + x, y, CRAG.z + z], dir: [0, 1, 0], size: [2.2, 2.8], color, marks: MARKS.pressed, lift: 0.2, pinned: true })
     }
     /** a round shaft from y0 to y1 at x and z, r0 wide at its foot and r1 at its top */
     const column = ({ x, z, y0, y1, r0, r1, bias }: { x: number; z: number; y0: number; y1: number; r0: number; r1: number; bias: number }) => {
       const geometry = new THREE.CylinderGeometry(r1 * k, r0 * k, (y1 - y0) * k, 12, 1, false)
-      paintSolid(canvas, { geometry, style: CASTLE_ROUND, bias, matrix: translation([CRAG.x + x * k, foot + ((y0 + y1) / 2) * k, CRAG.z + z * k]) })
+      paintSolid(far, { geometry, style: CASTLE_ROUND, bias, matrix: translation([CRAG.x + x * k, foot + ((y0 + y1) / 2) * k, CRAG.z + z * k]) })
     }
     const spireTower = ({ x, z, r, y0, y1, spire, bias = 0 }: { x: number; z: number; r: number; y0: number; y1: number; spire: number; bias?: number }) => {
       const gallery = y1 + r * 0.7
@@ -865,10 +863,10 @@ export function buildWorld() {
       const w = (x1 - x0) * k
       const cx = CRAG.x + ((x0 + x1) / 2) * k
       const bottom = Math.min(y0, buried)
-      paintSolid(canvas, { geometry: new THREE.BoxGeometry(w, (y1 - bottom) * k, depth * k), style: CASTLE, bias, matrix: translation([cx, foot + ((bottom + y1) / 2) * k, CRAG.z + z * k]) })
+      paintSolid(far, { geometry: new THREE.BoxGeometry(w, (y1 - bottom) * k, depth * k), style: CASTLE, bias, matrix: translation([cx, foot + ((bottom + y1) / 2) * k, CRAG.z + z * k]) })
       if (roof === 0) return
       const geometry = gableRoof({ w: depth * k * 1.06, h: roof * k, d: w * 1.04 }).rotateY(Math.PI / 2)
-      paintSolid(canvas, { geometry, style: CASTLE, bias: bias - 0.1, matrix: translation([cx, foot + y1 * k, CRAG.z + z * k]) })
+      paintSolid(far, { geometry, style: CASTLE, bias: bias - 0.1, matrix: translation([cx, foot + y1 * k, CRAG.z + z * k]) })
     }
     // x, z, radius, lowest window, top of the shaft, spire height, tone bias
     // prettier-ignore
@@ -892,7 +890,7 @@ export function buildWorld() {
       const [x, y, z] = cragPoint(range(-1.2, 4.3), range(0.3, 0.98))
       if (x < CRAG.x - 20 && rand() < 0.65) continue
       const height = range(16, 30)
-      paintFir(canvas, { x, y: y - 2, z, height, radius: height * 0.2, full: false, style: CRAG_FIR, bias: range(-0.1, 0.15) })
+      paintFir(far, { x, y: y - 2, z, height, radius: height * 0.2, full: false, style: CRAG_FIR, bias: range(-0.1, 0.15) })
     }
   }
 
@@ -946,7 +944,7 @@ export function buildWorld() {
     const geometry = new THREE.BufferGeometry()
     geometry.setAttribute('position', new THREE.BufferAttribute(position, 3))
     geometry.setIndex(index)
-    paintSolid(canvas, { geometry, style: MOUNTAIN })
+    paintSolid(far, { geometry, style: MOUNTAIN })
   }
 
   // ----- mist banks: level strokes below a billowy top line, with a light rim -----
@@ -977,7 +975,7 @@ export function buildWorld() {
         const color = glow < 0.5 ? mixColor(dark, mid, glow * 2) : mixColor(mid, light, glow * 2 - 1)
         // mist lies in long level streaks
         const across = size * range(0.6, 0.9)
-        canvas.solid.face({ at: [x + range(-0.5, 0.5) * step, y + range(-0.5, 0.5) * step, z + range(-20, 20)], dir: [1, range(-0.12, 0.12), 0], size: [across, across * range(3, 4.5)], color, lift: 0 })
+        farDabs.face({ at: [x + range(-0.5, 0.5) * step, y + range(-0.5, 0.5) * step, z + range(-20, 20)], dir: [1, range(-0.12, 0.12), 0], size: [across, across * range(3, 4.5)], color, lift: 0 })
       }
     }
   }
@@ -996,13 +994,16 @@ export function buildWorld() {
         const { f, color } = skyAt({ az, el, chance: rand() })
         if (f < 0.42 || el > 0.33 + (fbm(az * 9, 2) - 0.5) * 0.2) continue
         const across = VEIL.size * range(0.9, 1.3)
-        canvas.solid.face({ at: [x + range(-0.5, 0.5) * VEIL.step, y + range(-0.5, 0.5) * VEIL.step, VEIL.z + range(-30, 30)], dir: [1, range(-0.25, 0.25), 0], size: [across, across * range(1.6, 2.4)], color, lift: 0 })
+        farDabs.face({ at: [x + range(-0.5, 0.5) * VEIL.step, y + range(-0.5, 0.5) * VEIL.step, VEIL.z + range(-30, 30)], dir: [1, range(-0.25, 0.25), 0], size: [across, across * range(1.6, 2.4)], color, lift: 0 })
       }
     }
   }
 
-  scene.add(canvas.under.build())
-  scene.add(canvas.solid.build(LIMITS.solid), canvas.wood.build(LIMITS.wood), canvas.leaves.build(LIMITS.leaves), canvas.blades.build(LIMITS.blades))
+  // the underpainting of the valley is what stands in the sun's way
+  const under = canvas.under.build()
+  under.layers.enable(CASTER_LAYER)
+  scene.add(under, far.under.build(KINDS.far))
+  scene.add(canvas.solid.build(KINDS.solid), canvas.wood.build(KINDS.wood), canvas.leaves.build(KINDS.leaves), canvas.blades.build(KINDS.blades), farDabs.build(KINDS.far))
 
   return {
     scene,
@@ -1010,7 +1011,7 @@ export function buildWorld() {
     colliders,
     walkable: (x: number, z: number) => reachOf(x, z) === 0,
     start: { x: EYE_START.x, z: EYE_START.z, yaw: 0, pitch: -0.05 },
-    counts: { solid: canvas.solid.count, wood: canvas.wood.count, leaves: canvas.leaves.count, blades: canvas.blades.count },
+    counts: { solid: canvas.solid.count, wood: canvas.wood.count, leaves: canvas.leaves.count, blades: canvas.blades.count, far: farDabs.count },
   }
 }
 

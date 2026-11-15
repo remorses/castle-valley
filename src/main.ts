@@ -1,7 +1,7 @@
 // Bootstrap: renderer, first-person controls, game loop.
 // Sizes on screen are set against the reference frame, which is 270 pixels on its short side.
 import * as THREE from 'three'
-import { shared } from './paint.ts'
+import { bakeShade, shared } from './paint.ts'
 import { buildViewModel } from './viewmodel.ts'
 import { BACKDROP, buildWorld, groundHeight } from './world.ts'
 
@@ -26,20 +26,37 @@ renderer.autoClear = false
 const canvas = renderer.domElement
 document.body.appendChild(canvas)
 
-// ---------- the grade ----------
+// ---------- the finish ----------
 
-// The world is painted in saturated colours into a picture of its own. One pass then grades that picture, pixel by
-// pixel: a single colour runs through the shade and another through the light, which holds the palette together.
-// It only changes colours, so nothing depends on where the eye is. The hands are drawn after it: they are cut from
-// the reference frame and have its colours already.
-const GRADE_FRAGMENT = /* glsl */ `
+// The world is painted in saturated colours into a picture of its own. One pass then finishes that picture, pixel
+// by pixel. The grade: a single colour runs through the shade and another through the light, which holds the
+// palette together. Then, as in oil-paint's finish: the weave of the canvas under the paint, the brightest
+// passages rolled off toward the white of the paint, and a little varnish.
+// Nothing here reads the world, so nothing depends on where the eye is. The hands are drawn after it: they are
+// cut from the reference frame and have its colours already.
+const FINISH_FRAGMENT = /* glsl */ `
 uniform sampler2D tColor;
 uniform vec3 uShade;
 uniform vec3 uLight;
 uniform vec3 uLift;
 uniform float uSaturation;
+uniform float uCanvas;
 uniform float uVarnish;
 varying vec2 vUv;
+
+float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+float smoothNoise(vec2 p) {
+  vec2 i = floor(p), f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x), mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
+}
+// warp and weft of a medium linen, each thread a little uneven
+float weave(vec2 p) {
+  vec2 q = p / 2.6;
+  float n = smoothNoise(p / 40.0);
+  return sin(q.x * 3.14159) * sin(q.y * 3.14159 + floor(q.x) * 3.14159) * (0.3 + 1.4 * n * n);
+}
+
 void main() {
   vec3 c = texture2D(tColor, vUv).rgb;
   float l = dot(c, vec3(0.3, 0.59, 0.11));
@@ -48,6 +65,12 @@ void main() {
   c *= mix(uShade, uLight, smoothstep(0.04, 0.6, l));
   // the darkest paint is never black: it has the colour of the shade in it
   c += uLift * pow(1.0 - l, 4.0);
+  vec2 px = gl_FragCoord.xy;
+  float w = weave(px);
+  c *= 1.0 + (0.6 * (weave(px + vec2(1.0, 0.0)) - w) - 0.8 * (weave(px + vec2(0.0, 1.0)) - w)) * 0.022 * uCanvas + w * 0.006 * uCanvas;
+  // the brightest passages roll off toward the white of the paint and never past it
+  vec3 over = max(c - 0.8, 0.0);
+  c = min(c, 0.8) + over / (1.0 + over * 5.0);
   // varnish: more depth in the darks, the lights left alone
   c = mix(c, c * c * (3.0 - 2.0 * c), uVarnish);
   gl_FragColor = vec4(c, 1.0);
@@ -55,7 +78,7 @@ void main() {
 `
 
 const picture = new THREE.WebGLRenderTarget(1, 1, { samples: 4, depthBuffer: true })
-const grade = new THREE.Mesh(
+const finish = new THREE.Mesh(
   new THREE.PlaneGeometry(2, 2),
   new THREE.ShaderMaterial({
     uniforms: {
@@ -64,19 +87,22 @@ const grade = new THREE.Mesh(
       uLight: { value: new THREE.Vector3(1.04, 1.0, 0.94) },
       uLift: { value: new THREE.Vector3(0.012, 0.008, 0.03) },
       uSaturation: { value: 1 },
-      uVarnish: { value: 0.3 },
+      uCanvas: { value: 1 },
+      uVarnish: { value: 0.22 },
     },
     vertexShader: 'varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }',
-    fragmentShader: GRADE_FRAGMENT,
+    fragmentShader: FINISH_FRAGMENT,
     depthTest: false,
     depthWrite: false,
   }),
 )
-grade.frustumCulled = false
+finish.frustumCulled = false
 const flat = new THREE.Camera()
 
 const world = buildWorld()
 const hands = buildViewModel()
+// the sun's shade over the part of the valley the player can walk
+bakeShade({ renderer, scene: world.scene, center: new THREE.Vector3(0, 0, -75), half: 260 })
 const camera = new THREE.PerspectiveCamera(70, 1, 0.25, 9000)
 camera.rotation.order = 'YXZ'
 
@@ -219,7 +245,7 @@ function render(time: number) {
   renderer.render(world.scene, camera)
   renderer.setRenderTarget(null)
   renderer.clear()
-  renderer.render(grade, flat)
+  renderer.render(finish, flat)
   renderer.render(hands.scene, hands.camera)
 }
 
@@ -235,7 +261,7 @@ const debug = {
   stick,
   counts: world.counts,
   scene: world.scene,
-  grade: grade.material.uniforms,
+  finish: finish.material.uniforms,
   manual: false,
   time: 3,
   /** place the player, draw one frame, return it as a PNG data URL */

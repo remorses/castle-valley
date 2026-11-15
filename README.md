@@ -33,8 +33,11 @@ dabs ─── about 2.5 million instanced cards, each one mark of the brush she
   are measured from the reference video (`RAMPS` in `src/paint.ts`).
 - **Each kind of thing has its painter** (`src/things.ts`): lobes of leaves round a dark core, bark up a trunk,
   boughs that hang from a fir, strokes along the grain of a wall, flicks of grass.
-- **One colour grade** runs over the finished picture (`src/main.ts`): the shade leans to violet and the light
-  to warm yellow, which holds the saturated palette together. It changes colours only, pixel by pixel.
+- **Sun and shade.** The valley's shade is drawn once from the sun. A dab takes sun or shade whole, so the
+  edge of a shadow is a ragged line of whole dabs.
+- **Mist** puts distance between one row of things and the next: each dab fades by its distance from you.
+- **The finish** runs once over the picture (`src/main.ts`): a colour grade that leans the shade to violet and
+  the light to warm yellow, the weave of the canvas, and a little varnish. It changes colours only.
 - **Far away, fewer and larger dabs.** Each dab has a fixed rank. With distance only the low ranks stay and
   grow to cover their neighbours, so strokes never swap.
 
