@@ -115,6 +115,12 @@ const RAMPS = {
   crag: ['#0c0b20', '#11102a', '#161533', '#1d1c3f', '#272654', '#363768'].map(hex),
   cragTree: ['#070711', '#090a1a', '#0c0e22', '#101329', '#131930', '#182137'].map(hex),
   mountain: ['#1b193c', '#25234f', '#2f2d5b', '#3b3964', '#4a456a', '#605573'].map(hex),
+  // Not in the video. Goblin skin is a yellower, lighter green than any leaf, so it reads against the shrubs.
+  goblin: ['#18280f', '#2d4215', '#4a641b', '#6c8726', '#93aa3a', '#b9c95b'].map(hex),
+  // troll skin has the slate blue of the far crag in it
+  troll: ['#12162a', '#212843', '#343e5d', '#4c597a', '#6b7a97', '#909eb4'].map(hex),
+  hide: ['#120a0c', '#24100f', '#3b1a14', '#59261a', '#7a3319', '#9c4416'].map(hex),
+  bone: ['#3c3524', '#5f553a', '#877a55', '#a99b71', '#c9bc90', '#e8dfb8'].map(hex),
 }
 
 export type RampName = keyof typeof RAMPS
@@ -185,6 +191,7 @@ uniform float uHazeDensity;
 uniform float uHazeMost;
 uniform float uTakeShade;
 uniform float uMist;
+uniform vec4 uFlash;
 
 // 1 in the sun, 0 in the shade of the still world. That shade never moves, so a dab can take it whole.
 float sunAt(vec3 world) {
@@ -198,6 +205,8 @@ vec3 lit(vec3 c, vec3 world) {
   // what takes no shade is painted in its own colours and is left as it is
   return mix(c * uShadeMul + uShadeAdd, c * mix(vec3(1.0), uSunMul, uTakeShade), sun);
 }
+// A thing that was just struck flares toward one light colour (a: how much).
+vec3 flared(vec3 c) { return mix(c, uFlash.rgb, uFlash.a); }
 // Mist puts distance between one row of things and the next. By true distance: turning the head changes nothing.
 vec3 hazed(vec3 c, vec3 world) {
   return mix(c, uHaze, uMist * min(uHazeMost, 1.0 - exp(-distance(world, cameraPosition) * uHazeDensity)));
@@ -212,7 +221,11 @@ export interface Air {
   mist?: boolean
 }
 
-const airUniforms = ({ shade = 1, mist = true }: Air) => ({ uTakeShade: { value: shade }, uMist: { value: mist ? 1 : 0 } })
+const airUniforms = ({ shade = 1, mist = true }: Air) => ({
+  uTakeShade: { value: shade },
+  uMist: { value: mist ? 1 : 0 },
+  uFlash: { value: new THREE.Vector4(0, 0, 0, 0) },
+})
 
 const SHADE_SIZE = 4096
 export const CASTER_LAYER = 1
@@ -306,8 +319,9 @@ void main() {
   float first = floor(code / 16.0);
   float count = code - first * 16.0;
 
-  // (the sky turns: its strokes turn with it)
+  // (the sky turns and creatures walk: their strokes turn with them)
   vec3 dir = mat3(modelMatrix) * aDir.xyz;
+  vec3 normal = mat3(modelMatrix) * aNormal.xyz;
   vec3 pinned = aPos;
   if (uSway + uGust > 0.0 && aData.w > 0.0) {
     float phase = dot(aPos, vec3(1.3, 0.7, 1.1));
@@ -342,7 +356,7 @@ void main() {
   vec2 across, along;
   if (aNormal.w > 0.5) {
     // A lying dab: a real patch of its surface, run along dir.
-    vec3 n = normalize(aNormal.xyz);
+    vec3 n = normalize(normal);
     vec3 A = dir - n * dot(dir, n);
     A = dot(A, A) > 1e-6 ? normalize(A) : normalize(cross(n, abs(n.x) > 0.9 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0)));
     vec3 a = mat3(viewMatrix) * A * half_.y;
@@ -368,7 +382,7 @@ void main() {
     across = normalize(sb + 1e-6);
   } else {
     // A card that faces the eye. One with a normal is on a solid thing: it is not painted from behind.
-    if (dot(aNormal.xyz, aNormal.xyz) > 0.25 && dot(aNormal.xyz, cameraPosition - pinned) < 0.0) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
+    if (dot(normal, normal) > 0.25 && dot(normal, cameraPosition - world.xyz) < 0.0) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
     vec3 vd = mat3(viewMatrix) * normalize(dir);
     float flatness = length(vd.xy);
     along = flatness > 1e-4 ? vd.xy / flatness : vec2(0.0, 1.0);
@@ -394,7 +408,7 @@ void main() {
   vUv = (vec2(mod(cell, ${BRUSH_COLUMNS}.0), floor(cell / ${BRUSH_COLUMNS}.0)) + q) / vec2(${BRUSH_COLUMNS}.0, ${BRUSH_ROWS}.0);
   // the dab takes sun or shade whole, so a shadow's edge is a ragged line of whole dabs
   // (asked where the dab is pinned, not where the wind has it: or it would flick between sun and shade)
-  vec3 c = jitter(lit(aColor.rgb, (modelMatrix * vec4(aPos, 1.0)).xyz), r.yzw, broken);
+  vec3 c = flared(jitter(lit(aColor.rgb, (modelMatrix * vec4(aPos, 1.0)).xyz), r.yzw, broken));
   // (a plain stroke has the mean tone of one with its lighter streak)
   c *= mix(1.06, 1.0, vFine);
   vC1 = hazed(c, world.xyz);
@@ -558,7 +572,8 @@ export class Dabs {
     this.normal.set([dab.normal[0] * 127, dab.normal[1] * 127, dab.normal[2] * 127, 127], i * 4)
   }
 
-  build({ min, max = [0, 0], sway = 0, gust = 0, jitter = 0.5, layered = false, ...air }: DabKind) {
+  /** The dabs as they are now. Things that move share one geometry between many meshes. */
+  geometry() {
     const geometry = new THREE.InstancedBufferGeometry()
     geometry.setAttribute('position', new THREE.Float32BufferAttribute([-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0], 3))
     geometry.setIndex([0, 1, 2, 0, 2, 3])
@@ -569,30 +584,37 @@ export class Dabs {
     geometry.setAttribute('aNormal', new THREE.InstancedBufferAttribute(this.normal.subarray(0, n * 4), 4, true))
     geometry.setAttribute('aColor', new THREE.InstancedBufferAttribute(this.color.subarray(0, n * 4), 4, true))
     geometry.instanceCount = n
-    const material = new THREE.ShaderMaterial({
-      uniforms: {
-        ...shared,
-        uMin: { value: new THREE.Vector2(...min) },
-        uMax: { value: new THREE.Vector2(...max) },
-        uSway: { value: sway },
-        uGust: { value: gust },
-        uJitter: { value: jitter },
-        ...airUniforms(air),
-        // so two meshes do not lay the same run of marks
-        uSalt: { value: 5.1 + 77.7 * meshes++ },
-      },
-      vertexShader: DAB_VERTEX,
-      fragmentShader: DAB_FRAGMENT,
-      // a lying stroke is seen from below when the eye is under its surface
-      side: THREE.DoubleSide,
-      // the soft edge of a mark is cut by the antialiasing samples: no sorting, no blending
-      alphaToCoverage: true,
-      depthWrite: !layered,
-    })
-    const mesh = new THREE.Mesh(geometry, material)
+    return geometry
+  }
+
+  build(kind: DabKind) {
+    const mesh = new THREE.Mesh(this.geometry(), dabMaterial(kind))
     mesh.frustumCulled = false
     return mesh
   }
+}
+
+export function dabMaterial({ min, max = [0, 0], sway = 0, gust = 0, jitter = 0.5, layered = false, ...air }: DabKind) {
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      ...shared,
+      uMin: { value: new THREE.Vector2(...min) },
+      uMax: { value: new THREE.Vector2(...max) },
+      uSway: { value: sway },
+      uGust: { value: gust },
+      uJitter: { value: jitter },
+      ...airUniforms(air),
+      // so two meshes do not lay the same run of marks
+      uSalt: { value: 5.1 + 77.7 * meshes++ },
+    },
+    vertexShader: DAB_VERTEX,
+    fragmentShader: DAB_FRAGMENT,
+    // a lying stroke is seen from below when the eye is under its surface
+    side: THREE.DoubleSide,
+    // the soft edge of a mark is cut by the antialiasing samples: no sorting, no blending
+    alphaToCoverage: true,
+    depthWrite: !layered,
+  })
 }
 
 // ---------- leaves in the air ----------
@@ -696,7 +718,7 @@ const UNDER_FRAGMENT = /* glsl */ `
 varying vec3 vColor;
 varying vec3 vWorld;
 ${AIR}
-void main() { gl_FragColor = vec4(hazed(lit(vColor, vWorld), vWorld), 1.0); }
+void main() { gl_FragColor = vec4(hazed(flared(lit(vColor, vWorld)), vWorld), 1.0); }
 `
 
 export interface UnderKind extends Air {
@@ -728,7 +750,7 @@ export class Under {
     this.length += position.length
   }
 
-  build(kind: UnderKind = {}) {
+  geometry() {
     const position = new Float32Array(this.length)
     const color = new Float32Array(this.length)
     let offset = 0
@@ -740,7 +762,11 @@ export class Under {
     const geometry = new THREE.BufferGeometry()
     geometry.setAttribute('position', new THREE.BufferAttribute(position, 3))
     geometry.setAttribute('aColor', new THREE.BufferAttribute(color, 3))
-    const mesh = new THREE.Mesh(geometry, underMaterial(kind))
+    return geometry
+  }
+
+  build(kind: UnderKind = {}) {
+    const mesh = new THREE.Mesh(this.geometry(), underMaterial(kind))
     mesh.frustumCulled = false
     return mesh
   }

@@ -22,6 +22,21 @@ export interface Collider {
   r: number
 }
 
+/** Moves a circle out of every collider it overlaps. */
+export function pushOut({ x, z, radius, colliders }: { x: number; z: number; radius: number; colliders: Collider[] }) {
+  for (const c of colliders) {
+    const dx = x - c.x
+    const dz = z - c.z
+    const min = c.r + radius
+    const d2 = dx * dx + dz * dz
+    if (d2 >= min * min || d2 === 0) continue
+    const d = Math.sqrt(d2)
+    x = c.x + (dx / d) * min
+    z = c.z + (dz / d) * min
+  }
+  return { x, z }
+}
+
 const EYE_START = { x: 0, y: 1.7, z: 14 }
 const CRAG = { x: -55, z: -900, top: 178 }
 const HOUSE_SCALE = 0.62

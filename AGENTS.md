@@ -1,6 +1,7 @@
 # castle-valley
 
-Playable three.js recreation of a pixel-art clip (forest path, village, castle). Vite + TypeScript, no framework.
+Playable three.js recreation of a pixel-art clip (forest path, village, castle), with goblins and trolls to fight.
+Vite + TypeScript, no framework.
 
 Run `pnpm typecheck` after every change. `pnpm dev` starts Vite.
 
@@ -10,7 +11,7 @@ the workers.dev preview, `pnpm run deploy:prod` on https://omw-game.kimaki.dev. 
 ## architecture
 
 ```
-src/main.ts ───────▶ renderer, input, player step, game loop, debug hook
+src/main.ts ───────▶ renderer, input, player step (walk, jump, health), game loop, debug hook
    │
    ├──▶ src/world.ts ───── buildWorld(): one static scene, built once at load (about 2.5 million dabs)
    │       groundHeight(x, z) ◀── axis slope table + valley funnel + far hills   (also moves the player)
@@ -25,8 +26,19 @@ src/main.ts ───────▶ renderer, input, player step, game loop, de
    ├──▶ src/paint.ts ───── RAMPS palette, Dabs (instanced cards + the one dab shader), Under, noise helpers
    │       └──▶ src/brush.ts ── the brush sheet: eight marks made in code
    │
-   └──▶ src/viewmodel.ts ─ hands as pixel sprites (torch, sword), flame wobble, sparks: own scene with an
-                           orthographic camera in reference pixels, drawn after the world
+   ├──▶ src/mobs.ts ────── buildMobs(): goblins and trolls in camps (CAMPS). update() ──▶ think (stance: roam,
+   │                       chase, windup, recover, reel, dead) ──▶ move ──▶ pose. strike(): the sword lands
+   │
+   └──▶ src/viewmodel.ts ─ hands as pixel sprites (torch, sword), flame wobble, sparks, hearts: own scene with
+                           an orthographic camera in reference pixels, drawn after the world
+```
+
+One frame (`advance` in `main.ts`):
+
+```
+step(dt) ──▶ mobs.update() ──▶ hearts their blows take ──▶ hurt()      (not within GRACE_SECONDS of the last blow)
+         ──▶ hands.update() ─▶ struck: the blade lands ──▶ mobs.strike() ──▶ flash, knock back, flecks, death
+         ──▶ render()
 ```
 
 The painter follows https://patch.gg/blendi/oil-paint (source: `~/Documents/GitHub/oil-paint`). Read its
@@ -79,7 +91,15 @@ The painter follows https://patch.gg/blendi/oil-paint (source: `~/Documents/GitH
 - **Colours** never go through `THREE.Color`. `hex()` keeps raw sRGB and the renderer converts nothing.
 - **Layout** is in world units (metres). The player starts at `z = 14` and looks toward `-Z`. Tables of paths,
   meadows, houses, towers and peaks sit next to the code that uses them in `world.ts`.
-- Per-frame work is the player step, the sparks and two render calls. `window.game.counts` shows the dab counts.
+- **Creatures** (`mobs.ts`) are the only things that move through the world. A kind's five parts (body, arms,
+  legs) are painted once with `paintSolid` round their joints; every creature of the kind shares those
+  geometries and has its own pair of materials (`uFlash` flares it when it is struck). The dab shader turns
+  strokes and normals with `modelMatrix`. Paint a moving thing with a light that does not depend on where it
+  faces (`lightOf: fromAbove`): the baked sun would turn with it. Never scale a creature's group: dab sizes
+  are in metres and do not follow the matrix. Build a larger kind instead (`scale` in `KINDS`).
+- **Game state** is in `player` (`main.ts`) and in each `Mob`. Events between them are return values:
+  `mobs.update()` returns the damage dealt, `hands.update()` returns `struck`. `window.game.mobs.list` shows them.
+- Per-frame work is the player step, the creatures, the sparks and two render calls. `window.game.counts` shows the dab counts.
 
 ## hand sprites
 

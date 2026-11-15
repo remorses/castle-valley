@@ -35,13 +35,34 @@
         pointer-events: none;
         transition: opacity 1.2s;
       }
+      #jump {
+        position: fixed;
+        right: 6vw;
+        bottom: 34vh;
+        width: 58px;
+        height: 58px;
+        border: 2px solid #e6d5a4;
+        border-radius: 50%;
+        background: rgba(20, 16, 40, 0.35);
+        font: 11px/1 ui-monospace, Menlo, monospace;
+        letter-spacing: 0.08em;
+        color: #e6d5a4;
+        opacity: 0.7;
+        touch-action: none;
+        user-select: none;
+        -webkit-user-select: none;
+      }
       .touch,
-      .mouse {
+      .mouse,
+      #jump {
         display: none;
       }
       @media (pointer: coarse) {
         .touch {
           display: inline;
+        }
+        #jump {
+          display: block;
         }
       }
       @media (pointer: fine) {
@@ -53,9 +74,10 @@
   </head>
   <body>
     <div id="hint">
-      <span class="mouse">click to look &middot; WASD to walk &middot; shift to run &middot; click to swing</span>
+      <span class="mouse">click to look &middot; WASD to walk &middot; shift to run &middot; space to jump &middot; click to swing</span>
       <span class="touch">left thumb walks &middot; right thumb looks &middot; tap to swing</span>
     </div>
+    <button id="jump" type="button">JUMP</button>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

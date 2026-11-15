@@ -10,6 +10,10 @@ const REFERENCE = { width: 270, height: 405 }
 // On a wide screen the hands stay this far apart at most, in sprite pixels: about 1.1 times the screen's height.
 const HANDS_MAX_SPAN = 445
 const SWING_SECONDS = 0.42
+// the share of a swing at which the blade lands
+const STRIKE_AT = 0.3
+// how far the hands hang back when the player rises or falls: sprite pixels for a metre a second, and the most
+const HANG = { rate: 1.3, most: 9 }
 const SPARK_COUNT = 14
 const SPARK_COLORS = ['#eea757', '#c8743a', '#a3512c'].map(hex)
 
@@ -154,7 +158,49 @@ function buildSparks() {
   return { mesh, update }
 }
 
-export function buildViewModel() {
+// A heart of the player's health, drawn in the pixels of the sprites. o: outline, r: red, h: highlight
+// prettier-ignore
+const HEART_ROWS = [
+  '..oo...oo..',
+  '.orro.orro.',
+  'orhrrorrrro',
+  'orhrrrrrrro',
+  'orrrrrrrrro',
+  '.orrrrrrro.',
+  '..orrrrro..',
+  '...orrro...',
+  '....oro....',
+  '.....o.....',
+]
+const HEART_SIZE = [HEART_ROWS[0].length, HEART_ROWS.length]
+const HEART_INKS = {
+  full: { o: '#2a0d12', r: '#c5362c', h: '#f08a6a' },
+  lost: { o: '#2a0d12', r: '#4a3440', h: '#4a3440' },
+}
+/** from the screen's top left corner to the first heart, and between hearts, in sprite pixels */
+const HEART_MARGIN = 6
+const HEART_GAP = 1
+
+function heartMaterial(inks: Record<string, string>) {
+  const [width, height] = HEART_SIZE
+  const data = new Uint8Array(width * height * 4)
+  HEART_ROWS.forEach((row, j) => {
+    for (let i = 0; i < width; i++) {
+      const ink = inks[row[i]]
+      if (!ink) continue
+      const [r, g, b] = hex(ink)
+      // the first row of a texture is its bottom
+      data.set([r * 255, g * 255, b * 255, 255], ((height - 1 - j) * width + i) * 4)
+    }
+  })
+  const map = new THREE.DataTexture(data, width, height)
+  map.magFilter = map.minFilter = THREE.NearestFilter
+  map.needsUpdate = true
+  return new THREE.MeshBasicMaterial({ map, alphaTest: 0.5, depthTest: false })
+}
+
+/** hearts: how many the player has when whole */
+export function buildViewModel({ hearts: heartCount }: { hearts: number }) {
   const scene = new THREE.Scene()
   // reference pixels, y up
   const camera = new THREE.OrthographicCamera(0, 1, 1, 0, -10, 10)
@@ -170,7 +216,17 @@ export function buildViewModel() {
   sword.add(swordSprite)
   scene.add(torch, sword)
 
+  // Hearts in the top left corner. They show only while the player is hurt: the frame stays clean otherwise.
+  const heartInks = { full: heartMaterial(HEART_INKS.full), lost: heartMaterial(HEART_INKS.lost) }
+  const hearts = Array.from({ length: heartCount }, () => {
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(HEART_SIZE[0], HEART_SIZE[1]).translate(HEART_SIZE[0] / 2, HEART_SIZE[1] / 2, 0), heartInks.full)
+    mesh.frustumCulled = false
+    scene.add(mesh)
+    return mesh
+  })
+
   let width = REFERENCE.width
+  let height = REFERENCE.height
   let scale = 1
   let inset = 0
   let swordDrop = 0
@@ -185,6 +241,7 @@ export function buildViewModel() {
       camera.top = renderHeight
       camera.updateProjectionMatrix()
       width = renderWidth
+      height = renderHeight
       // sprites are 1:1 on a tall screen and shrink to fit the height of a wide one
       scale = Math.min(renderWidth / REFERENCE.width, renderHeight / REFERENCE.height)
       // how far each hand is moved in from its corner of the screen
@@ -194,32 +251,46 @@ export function buildViewModel() {
       swordDrop = (SWORD.cut - SWORD.margin[1]) * THREE.MathUtils.smoothstep(inset, 0, SWORD.margin[0])
       torch.scale.setScalar(scale)
       sword.scale.setScalar(scale)
+      for (const heart of hearts) heart.scale.setScalar(scale)
     },
     swing() {
       if (swing < 0) swing = 0
     },
-    /** bob: walk cycle phase, stride: 0..1 walk speed, turn: yaw speed in rad/s */
-    update(dt: number, time: number, bob: number, stride: number, turn: number) {
+    /**
+     * bob: walk cycle phase, stride: 0..1 walk speed, turn: yaw speed in rad/s, rise: metres a second upward,
+     * health: hearts left. Returns struck: true in the frame the blade of a swing lands.
+     */
+    update({ dt, time, bob, stride, turn, rise, health }: { dt: number; time: number; bob: number; stride: number; turn: number; rise: number; health: number }) {
       sparks.update(dt, time)
       const lag = THREE.MathUtils.clamp(turn * 4, -10, 10)
+      // the hands hang back: they are late to rise in a jump and late to fall
+      const hang = THREE.MathUtils.clamp(-rise * HANG.rate, -HANG.most, HANG.most)
       const idle = Math.sin(time * 1.1) * 1.2
       torch.position.set(
         Math.round((inset - TORCH.margin[0] + Math.sin(bob) * 4 * stride + lag) * scale),
-        Math.round((-TORCH.margin[1] + Math.abs(Math.cos(bob)) * 5 * stride + idle) * scale),
+        Math.round((-TORCH.margin[1] + Math.abs(Math.cos(bob)) * 5 * stride + idle + hang) * scale),
         0,
       )
+      hearts.forEach((heart, i) => {
+        heart.visible = health < heartCount
+        heart.material = i < health ? heartInks.full : heartInks.lost
+        heart.position.set(Math.round((HEART_MARGIN + i * (HEART_SIZE[0] + HEART_GAP)) * scale), Math.round(height - (HEART_MARGIN + HEART_SIZE[1]) * scale), 0)
+      })
 
+      const before = swing
       if (swing >= 0) swing += dt / SWING_SECONDS
+      const struck = before >= 0 && before < STRIKE_AT && swing >= STRIKE_AT
       if (swing > 1) swing = -1
       const slash = swing < 0 ? 0 : Math.sin(Math.PI * swing)
       const restX = width / scale - inset - (SWORD.size[0] - SWORD.margin[0]) + SWORD.pivot[0]
       const restY = -SWORD.margin[1] - swordDrop + SWORD.pivot[1]
       sword.position.set(
         Math.round((restX + Math.sin(bob + 1.3) * 5 * stride + lag * 1.4 - slash * 46) * scale),
-        Math.round((restY + Math.abs(Math.cos(bob + 1.3)) * 6 * stride - idle - slash * 14) * scale),
+        Math.round((restY + Math.abs(Math.cos(bob + 1.3)) * 6 * stride - idle - slash * 14 + hang * 1.2) * scale),
         0,
       )
       sword.rotation.z = slash * 1.2
+      return { struck }
     },
   }
 }

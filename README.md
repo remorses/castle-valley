@@ -1,7 +1,8 @@
 # castle-valley
 
-A playable three.js scene: you walk out of a dark forest, torch and sword in hand, toward a
-village under a castle. It recreates this pixel-art clip: https://x.com/de5imulate/status/1947024682118488116
+A playable three.js game: you walk out of a dark forest, torch and sword in hand, toward a
+village under a castle, and fight the goblins and trolls on the way. It recreates this pixel-art clip:
+https://x.com/de5imulate/status/1947024682118488116
 
 **Play it:** https://omw-game.kimaki.dev
 
@@ -14,7 +15,17 @@ pnpm dev
 | --- | --- | --- |
 | look | click, then move the mouse | drag the right half |
 | walk | `WASD` or arrows, `shift` runs | drag the left half |
-| swing | click or `space` | tap the right half |
+| jump | `space` | the JUMP button |
+| swing | click, `F` or `E` | tap the right half |
+
+## Creatures
+
+Packs of **goblins** and a few **trolls** roam the meadows and the paths (`src/mobs.ts`).
+
+- They see you from about 17 m, run at you and raise a club. Step back or jump before it comes down.
+- A swing of the sword strikes everything in reach before you. A goblin takes three blows, a troll nine.
+- You have five hearts. They show while you are hurt and come back when no blow has landed for a while.
+- Struck down, you start again at the forest and every creature is back at its home.
 
 ## How it looks painted
 
@@ -47,7 +58,11 @@ dabs ─── about 2.5 million instanced cards, each one mark of the brush she
   grow to cover their neighbours, so strokes never swap. Small strokes use a plain variant of the
   brush: one clean shape in one colour.
 
-The hands are **pixel sprites** cut from the reference frame and drawn over the world, like Doom weapons.
+- **Creatures are painted the same way.** Each part of a body is painted once and moves as a whole, so the
+  strokes stay on the creature as it walks. It is lit from straight above, which stays right as it turns.
+
+The hands and the hearts are **pixel sprites** drawn over the world, like Doom weapons. The hands are cut from
+the reference frame.
 
 ## Deploy
 

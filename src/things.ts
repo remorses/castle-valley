@@ -71,8 +71,13 @@ export interface SolidStyle extends Tone {
 /**
  * Keeps every face as underpainting and lays strokes on it. Faces must be wound outward.
  * bias shifts the tone of the whole thing: negative is darker.
+ * lightOf: how lit a face with this normal is, 0..1. The sun by default; a thing that turns needs a light that
+ * turns with it.
  */
-export function paintSolid(canvas: Canvas, { geometry: source, style, bias = 0, matrix }: { geometry: THREE.BufferGeometry; style: SolidStyle; bias?: number; matrix?: THREE.Matrix4 }) {
+export function paintSolid(
+  canvas: Canvas,
+  { geometry: source, style, bias = 0, matrix, lightOf = lightOn }: { geometry: THREE.BufferGeometry; style: SolidStyle; bias?: number; matrix?: THREE.Matrix4; lightOf?: (nx: number, ny: number, nz: number) => number },
+) {
   if (!source.attributes.normal) source.computeVertexNormals()
   const geometry = source.index ? source.toNonIndexed() : source
   if (matrix) geometry.applyMatrix4(matrix)
@@ -107,7 +112,7 @@ export function paintSolid(canvas: Canvas, { geometry: source, style, bias = 0, 
 
     for (let v = i; v < i + 3; v++) {
       const at: Vec3 = [position.getX(v), position.getY(v), position.getZ(v)]
-      color.set(colorOf(style, { at, lit: lightOn(normal.getX(v), normal.getY(v), normal.getZ(v)), shift: bias + UNDER_SHIFT }), v * 3)
+      color.set(colorOf(style, { at, lit: lightOf(normal.getX(v), normal.getY(v), normal.getZ(v)), shift: bias + UNDER_SHIFT }), v * 3)
     }
 
     if (style.grain === 'level') grain.crossVectors(n, UP)
@@ -159,7 +164,7 @@ export function paintSolid(canvas: Canvas, { geometry: source, style, bias = 0, 
         normal: nn,
         dir: [grain.x + cross.x * turn, grain.y + cross.y * turn, grain.z + cross.z * turn],
         size,
-        color: colorOf(style, { at, lit: lightOn(...nn), shift: bias + (rand() - 0.5) * style.noise }),
+        color: colorOf(style, { at, lit: lightOf(...nn), shift: bias + (rand() - 0.5) * style.noise }),
       })
     }
   }
