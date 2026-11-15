@@ -3,6 +3,8 @@
 A playable three.js scene: you walk out of a dark forest, torch and sword in hand, toward a
 village under a castle. It recreates this pixel-art clip: https://x.com/de5imulate/status/1947024682118488116
 
+**Play it:** https://castle.kimaki.dev
+
 ```bash
 pnpm install
 pnpm dev
@@ -46,5 +48,14 @@ dabs ─── about 2.5 million instanced cards, each one mark of the brush she
   brush: one clean shape in one colour.
 
 The hands are **pixel sprites** cut from the reference frame and drawn over the world, like Doom weapons.
+
+## Deploy
+
+The game is a static site on Cloudflare Workers (`wrangler.jsonc`): no Worker code, only the files vite builds.
+
+```bash
+pnpm run deploy        # preview, on workers.dev
+pnpm run deploy:prod   # https://castle.kimaki.dev
+```
 
 See `AGENTS.md` for the code layout.

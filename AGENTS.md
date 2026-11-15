@@ -4,6 +4,9 @@ Playable three.js recreation of a pixel-art clip (forest path, village, castle).
 
 Run `pnpm typecheck` after every change. `pnpm dev` starts Vite.
 
+The game is a static site on Cloudflare Workers (`wrangler.jsonc`, no Worker code). `pnpm run deploy` puts it on
+the workers.dev preview, `pnpm run deploy:prod` on https://castle.kimaki.dev. Deploy the preview first and open it.
+
 ## architecture
 
 ```

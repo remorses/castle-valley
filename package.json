@@ -4,8 +4,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
-    "typecheck": "tsc"
+    "build": "tsc && vite build",
+    "typecheck": "tsc",
+    "deploy": "pnpm build && wrangler deploy --env preview",
+    "deploy:prod": "pnpm build && wrangler deploy"
   },
   "dependencies": {
     "three": "^0.187.0"
@@ -14,6 +16,7 @@
     "@types/three": "^0.187.0",
     "sharp": "^0.35.5",
     "typescript": "^7.0.2",
-    "vite": "^8.3.8"
+    "vite": "^8.3.8",
+    "wrangler": "^4.162.0"
   }
 }
