@@ -35,6 +35,8 @@ dabs ─── about 2.5 million instanced cards, each one mark of the brush she
   boughs that hang from a fir, strokes along the grain of a wall, flicks of grass.
 - **Sun and shade.** The valley's shade is drawn once from the sun. A dab takes sun or shade whole, so the
   edge of a shadow is a ragged line of whole dabs.
+- **Wind.** Gusts cross the valley in bands: leaves and firs are pushed downwind, grass bends, torn-off leaves
+  fly past, and the clouds drift.
 - **Mist** puts distance between one row of things and the next: each dab fades by its distance from you.
 - **The finish** runs once over the picture (`src/main.ts`): a colour grade that leans the shade to violet and
   the light to warm yellow, the weave of the canvas, and a little varnish. It changes colours only.

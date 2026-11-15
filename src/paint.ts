@@ -150,6 +150,8 @@ export const shared = {
   uRef: { value: 4 },
   // how strongly the light rakes across the thick paint
   uImpasto: { value: 1 },
+  // the way the wind blows over the ground (x, z): from the left of the first view, and a little toward it
+  uWind: { value: new THREE.Vector2(0.94, 0.34).normalize() },
   tBrush: { value: createBrushSheet() },
   // where the sun reaches: a picture of the still world's depth as the sun sees it
   tShade,
@@ -235,11 +237,24 @@ export function bakeShade({ renderer, scene, center, half }: { renderer: THREE.W
   shared.uShadeMatrix.value.copy(TO_TEXTURE).multiply(sun.projectionMatrix).multiply(sun.matrixWorldInverse)
 }
 
+// The wind: gusts cross the valley in bands that travel downwind, with finer squalls inside. 0 calm .. 1 full gust.
+// Needs uTime declared before it.
+const WIND = /* glsl */ `
+uniform vec2 uWind;
+float gustAt(vec2 xz) {
+  float along = dot(xz, uWind);
+  float across = dot(xz, vec2(-uWind.y, uWind.x));
+  float band = sin(along * 0.07 - uTime * 1.5 + 2.0 * sin(across * 0.04));
+  float squall = sin(along * 0.29 - uTime * 3.3 + across * 0.13);
+  return clamp(0.55 + 0.4 * band + 0.2 * squall, 0.0, 1.0);
+}
+`
+
 // ---------- dabs ----------
 
 const DAB_VERTEX = /* glsl */ `
 attribute vec3 aPos;
-attribute vec3 aData;   // across, along (metres), rank
+attribute vec4 aData;   // across, along (metres), rank, how much the wind carries it
 attribute vec4 aDir;    // the way the stroke runs. w: how far it is pulled toward the eye, in its own sizes
 attribute vec4 aNormal; // the surface it is on, or nothing. w: 1 for a lying dab
 attribute vec4 aColor;  // a: which marks of the brush sheet, and whether it is pinned by its foot
@@ -247,6 +262,7 @@ uniform float uPixel;
 uniform float uRef;
 uniform float uTime;
 uniform float uSway;
+uniform float uGust;
 uniform float uSalt;
 uniform float uJitter;
 uniform vec2 uMin;
@@ -257,6 +273,7 @@ varying vec3 vC2;
 varying vec4 vAxis;
 const float TAU = 6.28318530718;
 ${AIR}
+${WIND}
 vec4 hash4(float n) {
   vec4 q = fract(vec4(n) * vec4(0.1031, 0.1030, 0.0973, 0.1099));
   q += dot(q, q.wzxy + 33.33);
@@ -281,11 +298,15 @@ void main() {
   float first = floor(code / 16.0);
   float count = code - first * 16.0;
 
-  vec3 dir = aDir.xyz;
+  // (the sky turns: its strokes turn with it)
+  vec3 dir = mat3(modelMatrix) * aDir.xyz;
   vec3 pinned = aPos;
-  if (uSway > 0.0) {
+  if (uSway + uGust > 0.0 && aData.w > 0.0) {
     float phase = dot(aPos, vec3(1.3, 0.7, 1.1));
-    vec3 wind = vec3(sin(uTime * 1.3 + phase), 0.5 * sin(uTime * 1.7 + phase * 1.3), 0.6 * sin(uTime * 1.1 + phase * 0.7)) * uSway;
+    float gust = gustAt(aPos.xz);
+    // pushed downwind by the gust, and fluttering on its own, harder in a gust
+    vec3 flutter = vec3(sin(uTime * 2.3 + phase), 0.5 * sin(uTime * 3.1 + phase * 1.3), 0.6 * sin(uTime * 1.9 + phase * 0.7));
+    vec3 wind = (vec3(uWind.x, 0.0, uWind.y) * uGust * gust + flutter * uSway * (0.4 + gust)) * aData.w;
     // a blade bends from its foot, a leaf moves whole
     if (foot > 0.5) dir += wind * 3.0;
     else pinned += wind;
@@ -354,7 +375,8 @@ void main() {
   vec2 q = vec2(position.x * flip, position.y * end_) * 0.5 + 0.5;
   vUv = (vec2(mod(cell, ${BRUSH_COLUMNS}.0), floor(cell / ${BRUSH_COLUMNS}.0)) + q) / vec2(${BRUSH_COLUMNS}.0, ${BRUSH_ROWS}.0);
   // the dab takes sun or shade whole, so a shadow's edge is a ragged line of whole dabs
-  vec3 c = jitter(lit(aColor.rgb, world.xyz), r.yzw, uJitter);
+  // (asked where the dab is pinned, not where the wind has it: or it would flick between sun and shade)
+  vec3 c = jitter(lit(aColor.rgb, (modelMatrix * vec4(aPos, 1.0)).xyz), r.yzw, uJitter);
   vC1 = hazed(c, world.xyz);
   vC2 = hazed(jitter(c * 1.22 + 0.012, r.wxy, uJitter * 1.2), world.xyz);
   vAxis = vec4(across * flip, along * end_);
@@ -370,18 +392,22 @@ varying vec3 vC2;
 varying vec4 vAxis;
 void main() {
   vec4 t = texture2D(tBrush, vUv);
-  if (t.g < 0.3) discard;
+  // The edge of the mark is one pixel wide on the canvas, however large the mark is drawn: the antialiasing
+  // samples then cut it cleanly. An edge many pixels wide would be a band of stipple that crawls as the eye moves.
+  float cover = clamp((t.g - 0.46) / max(fwidth(t.g), 1e-4) + 0.5, 0.0, 1.0);
+  if (cover <= 0.0) discard;
   vec2 e = vec2(1.5 / 512.0, 0.0);
   float hu = texture2D(tBrush, vUv + e.xy).r - texture2D(tBrush, vUv - e.xy).r;
   float hv = texture2D(tBrush, vUv + e.yx).r - texture2D(tBrush, vUv - e.yx).r;
   // the paint stands up off the canvas and the room's light, from the upper left, rakes across it
   vec2 g = vAxis.xy * hu + vAxis.zw * hv;
-  float rake = 0.5 * g.x - 0.7 * g.y;
+  // No ridge at the very rim of the mark, where the paint ends: it would be a line one pixel wide that shimmers.
+  float rake = (0.5 * g.x - 0.7 * g.y) * smoothstep(0.5, 0.9, t.g);
   vec3 col = mix(vC1, vC2, smoothstep(0.52, 0.78, t.b));
   col *= mix(0.95, 1.04, t.r);
   col *= 1.0 + rake * 1.25 * uImpasto;
   col += vec3(1.0, 0.97, 0.9) * pow(max(rake, 0.0), 2.0) * 1.2 * uImpasto;
-  gl_FragColor = vec4(col, smoothstep(0.3, 0.62, t.g));
+  gl_FragColor = vec4(col, cover);
 }
 `
 
@@ -412,6 +438,8 @@ export interface FacingDab {
   foot?: boolean
   /** never drops out with distance: window lights */
   pinned?: boolean
+  /** how much the wind carries it. 0: it stands still (bark). 1 by default. The top of a fir has more than its foot */
+  bend?: number
 }
 
 /** A stroke that lies on a surface and runs along `dir`. */
@@ -432,8 +460,15 @@ export interface DabKind extends Air {
   max?: [number, number]
   /** metres of wind movement */
   sway?: number
+  /** metres a dab is pushed downwind in a full gust */
+  gust?: number
   /** broken colour: how differently each dab is mixed from its neighbours */
   jitter?: number
+  /**
+   * For far things. Their strokes leave no depth: where two overlap, the one laid later is on top, always.
+   * With a depth each they would change places whenever the eye moved, because a depth is too coarse out there.
+   */
+  layered?: boolean
 }
 
 const INITIAL_DABS = 1 << 14
@@ -442,7 +477,7 @@ let meshes = 0
 /** Collects dabs and builds one instanced mesh from them. */
 export class Dabs {
   private pos = new Float32Array(INITIAL_DABS * 3)
-  private data = new Float32Array(INITIAL_DABS * 3)
+  private data = new Float32Array(INITIAL_DABS * 4)
   private dir = new Int8Array(INITIAL_DABS * 4)
   private normal = new Int8Array(INITIAL_DABS * 4)
   private color = new Uint8Array(INITIAL_DABS * 4)
@@ -488,7 +523,7 @@ export class Dabs {
     const i = this.slot()
     this.put(i, dab)
     if (dab.foot) this.color[i * 4 + 3] += FOOT
-    this.data.set([dab.size[0], dab.size[1], dab.pinned ? 0 : this.rank()], i * 3)
+    this.data.set([dab.size[0], dab.size[1], dab.pinned ? 0 : this.rank(), dab.bend ?? 1], i * 4)
     this.dir[i * 4 + 3] = clamp(dab.lift ?? 0.5, -1, 1) * 127
     if (dab.normal) this.normal.set([dab.normal[0] * 127, dab.normal[1] * 127, dab.normal[2] * 127], i * 4)
   }
@@ -496,17 +531,17 @@ export class Dabs {
   lie(dab: LyingDab) {
     const i = this.slot()
     this.put(i, dab)
-    this.data.set([dab.size[0], dab.size[1], this.rank()], i * 3)
+    this.data.set([dab.size[0], dab.size[1], this.rank(), 0], i * 4)
     this.normal.set([dab.normal[0] * 127, dab.normal[1] * 127, dab.normal[2] * 127, 127], i * 4)
   }
 
-  build({ min, max = [0, 0], sway = 0, jitter = 0.5, ...air }: DabKind) {
+  build({ min, max = [0, 0], sway = 0, gust = 0, jitter = 0.5, layered = false, ...air }: DabKind) {
     const geometry = new THREE.InstancedBufferGeometry()
     geometry.setAttribute('position', new THREE.Float32BufferAttribute([-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0], 3))
     geometry.setIndex([0, 1, 2, 0, 2, 3])
     const n = this.count
     geometry.setAttribute('aPos', new THREE.InstancedBufferAttribute(this.pos.subarray(0, n * 3), 3))
-    geometry.setAttribute('aData', new THREE.InstancedBufferAttribute(this.data.subarray(0, n * 3), 3))
+    geometry.setAttribute('aData', new THREE.InstancedBufferAttribute(this.data.subarray(0, n * 4), 4))
     geometry.setAttribute('aDir', new THREE.InstancedBufferAttribute(this.dir.subarray(0, n * 4), 4, true))
     geometry.setAttribute('aNormal', new THREE.InstancedBufferAttribute(this.normal.subarray(0, n * 4), 4, true))
     geometry.setAttribute('aColor', new THREE.InstancedBufferAttribute(this.color.subarray(0, n * 4), 4, true))
@@ -517,6 +552,7 @@ export class Dabs {
         uMin: { value: new THREE.Vector2(...min) },
         uMax: { value: new THREE.Vector2(...max) },
         uSway: { value: sway },
+        uGust: { value: gust },
         uJitter: { value: jitter },
         ...airUniforms(air),
         // so two meshes do not lay the same run of marks
@@ -528,11 +564,95 @@ export class Dabs {
       side: THREE.DoubleSide,
       // the soft edge of a mark is cut by the antialiasing samples: no sorting, no blending
       alphaToCoverage: true,
+      depthWrite: !layered,
     })
     const mesh = new THREE.Mesh(geometry, material)
     mesh.frustumCulled = false
     return mesh
   }
+}
+
+// ---------- leaves in the air ----------
+
+const FLYING_VERTEX = /* glsl */ `
+attribute vec4 aSeed;  // its place in the box of air, 0..1 each way, and its own chance
+attribute vec3 aColor;
+uniform float uTime;
+uniform float uPixel;
+uniform float uRef;
+uniform vec3 uBox;
+uniform float uSpeed;
+varying vec2 vUv;
+varying vec3 vColor;
+${AIR}
+${WIND}
+void main() {
+  vec4 r = fract(aSeed.w * vec4(1.0, 7.13, 13.7, 31.1));
+  // carried downwind, each at its own speed, sinking a little and thrown about
+  vec3 p = aSeed.xyz * uBox + vec3(uWind.x, 0.0, uWind.y) * uSpeed * (0.6 + 0.8 * r.x) * uTime;
+  p.y -= uTime * (0.3 + 0.6 * r.y);
+  p += vec3(sin(uTime * 1.7 + r.z * 40.0), sin(uTime * 2.3 + r.w * 40.0), cos(uTime * 1.3 + r.x * 40.0)) * 0.6;
+  // the box of air travels with the eye: a leaf that leaves it on one side comes in on the other
+  p = mod(p - cameraPosition + uBox * 0.5, uBox) - uBox * 0.5;
+  vec3 edge = abs(p) / uBox;
+  float whole = smoothstep(0.5, 0.42, max(edge.x, max(edge.y, edge.z)));
+  vec3 world = p + cameraPosition;
+  vec4 vc = viewMatrix * vec4(world, 1.0);
+  if (-vc.z < 0.3 || whole <= 0.0) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
+  // more of them fly in a gust
+  whole *= step(r.w, 0.35 + 0.65 * gustAt(world.xz));
+  float size = max(0.05 + 0.07 * r.y, 0.9 * uPixel * uRef * length(p)) * whole;
+  // it tumbles as it flies: it spins, and shows its face and then its edge
+  float spin = r.z * 6.2832 + uTime * (3.0 + 5.0 * r.w);
+  float face = 0.25 + 0.75 * abs(cos(uTime * (4.0 + 4.0 * r.x) + r.y * 6.2832));
+  vec2 along = vec2(cos(spin), sin(spin));
+  vc.xy += vec2(along.y, -along.x) * position.x * size * face + along * position.y * size * 1.6;
+  gl_Position = projectionMatrix * vc;
+  float cell = 4.0 + step(0.5, r.x);
+  vUv = (vec2(mod(cell, ${BRUSH_COLUMNS}.0), floor(cell / ${BRUSH_COLUMNS}.0)) + position.xy * 0.5 + 0.5) / vec2(${BRUSH_COLUMNS}.0, ${BRUSH_ROWS}.0);
+  vColor = hazed(lit(aColor, world), world) * (0.75 + 0.35 * face);
+}
+`
+
+const FLYING_FRAGMENT = /* glsl */ `
+uniform sampler2D tBrush;
+varying vec2 vUv;
+varying vec3 vColor;
+void main() {
+  float paint = texture2D(tBrush, vUv).g;
+  float cover = clamp((paint - 0.46) / max(fwidth(paint), 1e-4) + 0.5, 0.0, 1.0);
+  if (cover <= 0.0) discard;
+  gl_FragColor = vec4(vColor, cover);
+}
+`
+
+/**
+ * Leaves torn off by the wind: pressed dabs that fly downwind through a box of air round the eye and tumble.
+ * box: the size of that box, metres. speed: metres a second. They move through the world, not with the eye.
+ */
+export function buildFlyingLeaves({ count, colors, box, speed, rand }: { count: number; colors: RGB[]; box: Vec3; speed: number; rand: () => number }) {
+  const geometry = new THREE.InstancedBufferGeometry()
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute([-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0], 3))
+  geometry.setIndex([0, 1, 2, 0, 2, 3])
+  const seed = new Float32Array(count * 4)
+  const color = new Float32Array(count * 3)
+  for (let i = 0; i < count; i++) {
+    seed.set([rand(), rand(), rand(), rand()], i * 4)
+    color.set(colors[Math.floor(rand() * colors.length)], i * 3)
+  }
+  geometry.setAttribute('aSeed', new THREE.InstancedBufferAttribute(seed, 4))
+  geometry.setAttribute('aColor', new THREE.InstancedBufferAttribute(color, 3))
+  geometry.instanceCount = count
+  const material = new THREE.ShaderMaterial({
+    uniforms: { ...shared, ...airUniforms({}), uBox: { value: new THREE.Vector3(...box) }, uSpeed: { value: speed } },
+    vertexShader: FLYING_VERTEX,
+    fragmentShader: FLYING_FRAGMENT,
+    side: THREE.DoubleSide,
+    alphaToCoverage: true,
+  })
+  const mesh = new THREE.Mesh(geometry, material)
+  mesh.frustumCulled = false
+  return mesh
 }
 
 // ---------- underpainting ----------
@@ -556,9 +676,22 @@ ${AIR}
 void main() { gl_FragColor = vec4(hazed(lit(vColor, vWorld), vWorld), 1.0); }
 `
 
+export interface UnderKind extends Air {
+  /** for far things: drawn a little farther than it is, so the strokes that lie on it are never behind it */
+  pushBack?: boolean
+}
+
 /** flat colour per vertex, from the `aColor` attribute, in the sun's shade and the mist like the dabs over it */
-export function underMaterial(air: Air = {}) {
-  return new THREE.ShaderMaterial({ uniforms: { ...shared, ...airUniforms(air) }, vertexShader: UNDER_VERTEX, fragmentShader: UNDER_FRAGMENT, side: THREE.DoubleSide })
+export function underMaterial({ pushBack = false, ...air }: UnderKind = {}) {
+  return new THREE.ShaderMaterial({
+    uniforms: { ...shared, ...airUniforms(air) },
+    vertexShader: UNDER_VERTEX,
+    fragmentShader: UNDER_FRAGMENT,
+    side: THREE.DoubleSide,
+    polygonOffset: pushBack,
+    polygonOffsetFactor: 2,
+    polygonOffsetUnits: 8,
+  })
 }
 
 /** Collects coloured triangles and builds one mesh from them. */
@@ -572,7 +705,7 @@ export class Under {
     this.length += position.length
   }
 
-  build(air: Air = {}) {
+  build(kind: UnderKind = {}) {
     const position = new Float32Array(this.length)
     const color = new Float32Array(this.length)
     let offset = 0
@@ -584,7 +717,7 @@ export class Under {
     const geometry = new THREE.BufferGeometry()
     geometry.setAttribute('position', new THREE.BufferAttribute(position, 3))
     geometry.setAttribute('aColor', new THREE.BufferAttribute(color, 3))
-    const mesh = new THREE.Mesh(geometry, underMaterial(air))
+    const mesh = new THREE.Mesh(geometry, underMaterial(kind))
     mesh.frustumCulled = false
     return mesh
   }

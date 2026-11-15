@@ -30,14 +30,15 @@ The painter follows https://patch.gg/blendi/oil-paint (source: `~/Documents/GitH
 `src/oilpaint/dabs.js`, `src/night/kit.js`, `src/world/forest.js` and `src/night/pines.js` before changing a painter.
 
 - **Everything visible is a dab or an under mesh.** No lights. The look must stay pinned to the world: never add
-  an effect that reads neighbouring pixels or depends on the place on screen (pixel grids, blurs, outlines).
+  an effect that makes the look on screen (pixel grids, blurs, outlines). The finish only grades and antialiases.
 - **The finish** (`main.ts`) is the one pass over the picture. The world is drawn into a render target (4 samples)
-  and finished pixel by pixel: the grade (shade toward violet, light toward warm, a lift in the darks), then the
+  and finished pixel by pixel: antialiasing (FXAA), the grade (shade toward violet, light toward warm, a lift in the darks), then the
   weave of the canvas, a rolloff of the brightest paint, and varnish. The palette is saturated on purpose and
   the grade holds it together. The hands are drawn after it, unfinished.
 - **Dabs** are instanced cards that show one mark of the brush sheet. `face` dabs turn to the eye and run along
   `dir` on the canvas. `lie` dabs lie on a surface and are stood up when seen edge on. Edges are cut with
-  alpha to coverage, so the render target needs its samples.
+  alpha to coverage, so the render target needs its samples. A mark's edge is one pixel wide on screen
+  (`fwidth`), and the raking light fades out at the rim: wide soft edges and rim highlights shimmer in motion.
 - **Colours are baked** when the world is built. The shader breaks each colour a little (`jitter`), streaks a
   lighter one into it, and rakes a light across the paint (`uImpasto`).
 - **Sun and shade** (`bakeShade` in `paint.ts`): the depth of the valley's under meshes is drawn once from the
@@ -46,6 +47,14 @@ The painter follows https://patch.gg/blendi/oil-paint (source: `~/Documents/GitH
 - **Mist** is by true distance from the eye, per dab (`hazed`). Never bake haze into colours.
 - **The `far` canvas** (castle, crag, mountains, mist banks, cloud veil) takes no shade and no mist: those things
   are painted in their own airy colours.
+- **The wind is strong** (`WIND` in `paint.ts`, `uWind`): gusts cross the valley in bands (`gustAt`). A dab is
+  pushed downwind by its kind's `gust` and flutters by its `sway`, times its own `bend` (0 for bark, more at the
+  top of a fir). Grass bends from its foot. Shade is asked where a dab is pinned, not where the wind has it.
+  `buildFlyingLeaves` is a box of torn-off leaves round the eye. The sky turns with the wind (`SKY_TURN` in
+  `main.ts`), so `skyAt` mixes its seam behind the start (`SKY_SEAM`).
+- **Far strokes are `layered`** (`far` and `sky` in `KINDS`): they leave no depth and are laid far to near, in the
+  order they are pushed. A depth is too coarse out there: with one each, overlapping strokes change places
+  whenever the eye moves and the picture flickers. Push new far things in far to near order.
 - **A mark fills about half of its card.** Solid things are covered several times over (`cover` in `SolidStyle`).
   A crown hides its under blob with lobes of leaves and two dark dabs behind each lobe.
 - **Dabs are kept in a few meshes by how they behave** (`KINDS` in `world.ts`): least and largest size on

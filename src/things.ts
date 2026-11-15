@@ -300,6 +300,8 @@ export function paintTrunk(canvas: Canvas, { x, z, foot, radius, height, strokes
       color: colorOf(mossy ? style.moss : style, { at, lit, shift }),
       marks: MARKS.strokes,
       normal: normalAt,
+      // bark stands still in the wind
+      bend: 0,
     })
   }
 }
@@ -307,6 +309,10 @@ export function paintTrunk(canvas: Canvas, { x, z, foot, radius, height, strokes
 // ---------- firs ----------
 
 const FIR_SIDES = 7
+// the dark cone inside a fir stops short of the top, which bends in the wind
+const FIR_CONE_TOP = 0.88
+// a fir bends from its foot: its top moves this many times the gust for every metre of height
+const FIR_BEND = 1 / 12
 
 /**
  * A narrow spire: tiers of boughs that hang out and down from the trunk, a stroke for each bough. Inside is a
@@ -321,7 +327,7 @@ export function paintFir(canvas: Canvas, { x, y, z, height, radius, full, style,
     const a0 = (s / FIR_SIDES) * Math.PI * 2
     const a1 = ((s + 1) / FIR_SIDES) * Math.PI * 2
     const r = radius * 0.72
-    cone.set([x, y + height * 0.98, z, x + Math.cos(a1) * r, y, z + Math.sin(a1) * r, x + Math.cos(a0) * r, y, z + Math.sin(a0) * r], s * 9)
+    cone.set([x, y + height * FIR_CONE_TOP, z, x + Math.cos(a1) * r, y, z + Math.sin(a1) * r, x + Math.cos(a0) * r, y, z + Math.sin(a0) * r], s * 9)
     for (let v = 0; v < 3; v++) color.set(dark, s * 9 + v * 3)
   }
   canvas.under.push(cone, color)
@@ -355,11 +361,12 @@ export function paintFir(canvas: Canvas, { x, y, z, height, radius, full, style,
         size: [(reach * (0.85 - 0.3 * up) * span + 0.1) * (0.85 + 0.3 * rand()), (reach * (1.35 - 0.4 * up) * span + 0.25) * (0.85 + 0.3 * rand())],
         color: colorOf(style, { at, lit, shift: bias + (rand() - 0.5) * style.noise }),
         lift: 0.25,
+        bend: Math.pow(up, 1.5) * height * FIR_BEND,
       })
     }
   }
   const tip: Vec3 = [x + height * lean[0], y + height * 0.99, z + height * lean[1]]
-  canvas.wood.face({ at: tip, dir: [0, 1, 0], size: [0.3 + height * 0.02, 0.9 + height * 0.06], color: colorOf(style, { at: tip, lit: 0.6, shift: bias }), marks: MARKS.blades, lift: 0.25 })
+  canvas.wood.face({ at: tip, dir: [0, 1, 0], size: [0.3 + height * 0.02, 0.9 + height * 0.06], color: colorOf(style, { at: tip, lit: 0.6, shift: bias }), marks: MARKS.blades, lift: 0.25, bend: height * FIR_BEND })
 }
 
 // ---------- grass and fern ----------

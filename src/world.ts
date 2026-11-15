@@ -11,7 +11,7 @@
 //   forest edge ....... z 0
 //   start ............. z 14
 import * as THREE from 'three'
-import { CASTER_LAYER, Dabs, MARKS, Under, billow, clamp, fbm, hex, lerp, lightOn, mixColor, mulberry, noise, ridged, smooth, tone, underMaterial } from './paint.ts'
+import { CASTER_LAYER, Dabs, MARKS, Under, buildFlyingLeaves, billow, clamp, fbm, hex, lerp, lightOn, mixColor, mulberry, noise, ridged, smooth, tone, underMaterial } from './paint.ts'
 import type { DabKind, RGB, Vec3 } from './paint.ts'
 import { paintCrown, paintFir, paintSolid, paintTrunk, paintTuft } from './things.ts'
 import type { Canvas, CrownStyle, SolidStyle, Tone, TrunkStyle } from './things.ts'
@@ -291,7 +291,8 @@ function cloud(x: number, y: number) {
  * The sky in a direction: az from -Z toward +X, el up, radians. chance in 0..1 frays the edges.
  * f is how thick the cloud is there.
  */
-function skyAt({ az, el, chance }: { az: number; el: number; chance: number }) {
+/** how thick the cloud is in a direction, without the chance of a single stroke */
+function cloudiness(az: number, el: number) {
   const x = az * 3.6
   const y = el * 4.4
   const body = cloud(x, y)
@@ -301,9 +302,19 @@ function skyAt({ az, el, chance }: { az: number; el: number; chance: number }) {
   // bright bank above the castle, darker to the right and near the horizon
   f += 0.17 * Math.exp(-((az + 0.2) ** 2 * 2.2 + (el - 0.62) ** 2 * 5))
   f -= 0.1 * smooth(-0.15, 0.45, az) + 0.04 * smooth(0.5, 0.05, el)
-  f += 0.06 * smooth(0.35, 1, el) + (chance - 0.5) * 0.03
+  return f + 0.06 * smooth(0.35, 1, el)
+}
+
+// The sky turns with the wind, so every part of it comes into view. Behind the start, where az wraps round,
+// one side is mixed into the other over this many radians.
+const SKY_SEAM = 0.8
+
+function skyAt({ az, el, chance }: { az: number; el: number; chance: number }) {
+  const seam = smooth(Math.PI - SKY_SEAM, Math.PI, az)
+  const here = cloudiness(az, el)
+  const f = (seam > 0 ? lerp(here, cloudiness(az - Math.PI * 2, el), seam) : here) + (chance - 0.5) * 0.03
   let color = SKY_TONES.find(([edge]) => f > edge)?.[1] ?? SKY_DARKEST
-  if (f > 0.5 && f < 0.56 && fbm(x * 0.6 + 40, y * 0.6 + 40) > 0.66) color = SKY_GREEN
+  if (seam === 0 && f > 0.5 && f < 0.56 && fbm(az * 2.16 + 40, el * 2.64 + 40) > 0.66) color = SKY_GREEN
   // below the horizon the valley is lost in mist
   const low = smooth(0.02, -0.12, el + (fbm(az * 6, 1) - 0.5) * 0.06)
   if (chance < low) color = BACKDROP
@@ -344,11 +355,13 @@ function buildSky(rand: () => number) {
   }
   dome.setAttribute('aColor', new THREE.BufferAttribute(color, 3))
   const sky = new THREE.Group()
-  sky.add(new THREE.Mesh(dome, underMaterial(KINDS.sky)), dabs.build(KINDS.sky))
-  for (const mesh of sky.children) {
-    mesh.frustumCulled = false
-    mesh.renderOrder = -10
-  }
+  const under = new THREE.Mesh(dome, underMaterial(KINDS.sky))
+  under.frustumCulled = false
+  // the sky is drawn before everything else: the dome, then its strokes
+  under.renderOrder = -11
+  const strokes = dabs.build(KINDS.sky)
+  strokes.renderOrder = -10
+  sky.add(under, strokes)
   return sky
 }
 
@@ -560,15 +573,24 @@ const reachOf = (x: number, z: number) => Math.max(0, Math.abs(x) - (valleyHalfW
 
 // ---------- how each kind of thing is painted ----------
 
-// How the dabs of each mesh behave. Sizes on screen are in pixels of the reference frame.
+// How the dabs of each mesh behave. Sizes on screen are in pixels of the reference frame. The wind is strong:
+// `gust` is how far a full gust pushes a dab, `sway` how far it flutters on its own, metres.
 // `far` holds what stands beyond the valley: it is painted in its own airy colours and takes no mist or shade.
 const KINDS: Record<'solid' | 'wood' | 'leaves' | 'blades' | 'far' | 'sky', DabKind> = {
   solid: { min: [1.2, 2.2], jitter: 0.45 },
-  wood: { min: [0.8, 2], max: [30, 125], jitter: 0.6 },
-  leaves: { min: [1.25, 2], max: [36, 56], sway: 0.04, jitter: 0.55, shade: 0.5 },
-  blades: { min: [0.6, 3], max: [15, 105], sway: 0.02, jitter: 0.55 },
-  far: { min: [1.2, 2.2], jitter: 0.35, shade: 0, mist: false },
-  sky: { min: [1.6, 3], jitter: 0.2, shade: 0, mist: false },
+  wood: { min: [0.8, 2], max: [30, 125], sway: 0.03, gust: 0.4, jitter: 0.6 },
+  leaves: { min: [1.25, 2], max: [36, 56], sway: 0.06, gust: 0.22, jitter: 0.55, shade: 0.5 },
+  blades: { min: [0.6, 3], max: [15, 105], sway: 0.03, gust: 0.22, jitter: 0.55 },
+  far: { min: [1.2, 2.2], jitter: 0.35, shade: 0, mist: false, layered: true },
+  sky: { min: [1.6, 3], jitter: 0.2, shade: 0, mist: false, layered: true },
+}
+
+// leaves torn off by the wind: mostly green, some turned yellow or brown
+const FLYING_LEAVES: { count: number; box: Vec3; speed: number; colors: RGB[] } = {
+  count: 2600,
+  box: [44, 16, 44],
+  speed: 9,
+  colors: [tone('bushy', 0.7), tone('bushy', 0.9), tone('grass', 0.8), tone('grass', 0.95), tone('canopy', 0.9), tone('path', 0.4), tone('roof', 0.7)],
 }
 
 const BARK: TrunkStyle = { ramp: 'bark', base: 0.2, light: 0.85, noise: 0.7, moss: { ramp: 'forestFloor', base: 0.4, light: 0.6, noise: 0.4 } }
@@ -801,6 +823,62 @@ export function buildWorld() {
   tower({ x: 14, z: -175, w: 3.4, h: 8 })
   tower({ x: 6, z: -165, w: 3, h: 5.5 })
 
+  // Far things are laid far to near, in this order: a depth cannot tell two overlapping strokes apart at this
+  // distance, so the stroke laid later is on top (`layered` in KINDS).
+
+  // ----- mountains -----
+  {
+    const peaks = [
+      { x: -820, z: -1650, h: 1400, r: 640 },
+      { x: -1500, z: -1950, h: 1400, r: 900 },
+      { x: -380, z: -2500, h: 1150, r: 560 },
+      { x: 230, z: -2700, h: 1100, r: 620 },
+      { x: 800, z: -1900, h: 700, r: 900 },
+      { x: 1900, z: -2050, h: 1300, r: 1000 },
+      { x: -2400, z: -2050, h: 1200, r: 1000 },
+      { x: -900, z: -3000, h: 1500, r: 900 },
+      { x: 900, z: -3200, h: 1500, r: 1000 },
+      { x: 2800, z: -2600, h: 1400, r: 1000 },
+    ]
+    const mountainHeight = (x: number, z: number) => {
+      // each peak is a broad dome that bounds a field of sharp ridges
+      let dome = 0
+      for (const p of peaks) {
+        const dd = Math.hypot(x - p.x, z - p.z) / p.r
+        if (dd < 1) dome = Math.max(dome, p.h * (1 - dd * dd))
+      }
+      const wx = x + 300 * (fbm(x * 0.0012, z * 0.0012) - 0.5)
+      const wz = z + 300 * (fbm(x * 0.0012 + 40, z * 0.0012 + 9) - 0.5)
+      const ridges = Math.pow(ridged(wx * 0.0026, wz * 0.0026), 1.4)
+      const crags = ridged(x * 0.0075 + 9, z * 0.0075 + 3)
+      return dome * (0.3 + 1.05 * ridges) + crags * 120 * smooth(0, 300, dome) - 150
+    }
+    const minX = -3300
+    const minZ = -3760
+    const step = 30
+    const nx = 221
+    const nz = 93
+    const position = new Float32Array(nx * nz * 3)
+    for (let j = 0; j < nz; j++) {
+      for (let i = 0; i < nx; i++) {
+        const x = minX + i * step
+        const z = minZ + j * step
+        position.set([x, mountainHeight(x, z), z], (j * nx + i) * 3)
+      }
+    }
+    const index: number[] = []
+    for (let j = 0; j < nz - 1; j++) {
+      for (let i = 0; i < nx - 1; i++) {
+        const a = j * nx + i
+        index.push(a, a + nx, a + 1, a + 1, a + nx, a + nx + 1)
+      }
+    }
+    const geometry = new THREE.BufferGeometry()
+    geometry.setAttribute('position', new THREE.BufferAttribute(position, 3))
+    geometry.setIndex(index)
+    paintSolid(far, { geometry, style: MOUNTAIN })
+  }
+
   // ----- castle on its crag -----
   {
     // rock: a polar height field, longer on the right as in the reference. rr: 0 at the middle, 1 at the foot
@@ -894,57 +972,21 @@ export function buildWorld() {
     }
   }
 
-  // ----- mountains -----
+  // ----- cloud veil: the sky's clouds repeated on a plane before the mountains. Peaks show above it and through its gaps -----
   {
-    const peaks = [
-      { x: -820, z: -1650, h: 1400, r: 640 },
-      { x: -1500, z: -1950, h: 1400, r: 900 },
-      { x: -380, z: -2500, h: 1150, r: 560 },
-      { x: 230, z: -2700, h: 1100, r: 620 },
-      { x: 800, z: -1900, h: 700, r: 900 },
-      { x: 1900, z: -2050, h: 1300, r: 1000 },
-      { x: -2400, z: -2050, h: 1200, r: 1000 },
-      { x: -900, z: -3000, h: 1500, r: 900 },
-      { x: 900, z: -3200, h: 1500, r: 1000 },
-      { x: 2800, z: -2600, h: 1400, r: 1000 },
-    ]
-    const mountainHeight = (x: number, z: number) => {
-      // each peak is a broad dome that bounds a field of sharp ridges
-      let dome = 0
-      for (const p of peaks) {
-        const dd = Math.hypot(x - p.x, z - p.z) / p.r
-        if (dd < 1) dome = Math.max(dome, p.h * (1 - dd * dd))
-      }
-      const wx = x + 300 * (fbm(x * 0.0012, z * 0.0012) - 0.5)
-      const wz = z + 300 * (fbm(x * 0.0012 + 40, z * 0.0012 + 9) - 0.5)
-      const ridges = Math.pow(ridged(wx * 0.0026, wz * 0.0026), 1.4)
-      const crags = ridged(x * 0.0075 + 9, z * 0.0075 + 3)
-      return dome * (0.3 + 1.05 * ridges) + crags * 120 * smooth(0, 300, dome) - 150
-    }
-    const minX = -3300
-    const minZ = -3760
-    const step = 30
-    const nx = 221
-    const nz = 93
-    const position = new Float32Array(nx * nz * 3)
-    for (let j = 0; j < nz; j++) {
-      for (let i = 0; i < nx; i++) {
-        const x = minX + i * step
-        const z = minZ + j * step
-        position.set([x, mountainHeight(x, z), z], (j * nx + i) * 3)
+    const VEIL = { z: -1560, step: 16, size: 24 }
+    for (let x = -4200; x < 4200; x += VEIL.step) {
+      for (let y = -100; y < 1300; y += VEIL.step) {
+        const dx = x - EYE_START.x
+        const dz = VEIL.z - EYE_START.z
+        const az = Math.atan2(dx, -dz)
+        const el = Math.atan2(y - EYE_START.y, Math.hypot(dx, dz))
+        const { f, color } = skyAt({ az, el, chance: rand() })
+        if (f < 0.42 || el > 0.33 + (fbm(az * 9, 2) - 0.5) * 0.2) continue
+        const across = VEIL.size * range(0.9, 1.3)
+        farDabs.face({ at: [x + range(-0.5, 0.5) * VEIL.step, y + range(-0.5, 0.5) * VEIL.step, VEIL.z + range(-30, 30)], dir: [1, range(-0.25, 0.25), 0], size: [across, across * range(1.6, 2.4)], color, lift: 0 })
       }
     }
-    const index: number[] = []
-    for (let j = 0; j < nz - 1; j++) {
-      for (let i = 0; i < nx - 1; i++) {
-        const a = j * nx + i
-        index.push(a, a + nx, a + 1, a + 1, a + nx, a + nx + 1)
-      }
-    }
-    const geometry = new THREE.BufferGeometry()
-    geometry.setAttribute('position', new THREE.BufferAttribute(position, 3))
-    geometry.setIndex(index)
-    paintSolid(far, { geometry, style: MOUNTAIN })
   }
 
   // ----- mist banks: level strokes below a billowy top line, with a light rim -----
@@ -982,28 +1024,15 @@ export function buildWorld() {
   bank({ z: -600, floor: -70, top: 40, swell: 40, width: 2800, size: 13, colors: [hex('#39396a'), hex('#4b4871'), hex('#5f5779')], seed: 3.7 })
   bank({ z: -990, floor: -70, top: 95, swell: 60, width: 3600, size: 20, colors: [hex('#29285a'), hex('#39396a'), hex('#4b4871')], seed: 11.3 })
 
-  // ----- cloud veil: the sky's clouds repeated on a plane before the mountains. Peaks show above it and through its gaps -----
-  {
-    const VEIL = { z: -1560, step: 16, size: 24 }
-    for (let x = -4200; x < 4200; x += VEIL.step) {
-      for (let y = -100; y < 1300; y += VEIL.step) {
-        const dx = x - EYE_START.x
-        const dz = VEIL.z - EYE_START.z
-        const az = Math.atan2(dx, -dz)
-        const el = Math.atan2(y - EYE_START.y, Math.hypot(dx, dz))
-        const { f, color } = skyAt({ az, el, chance: rand() })
-        if (f < 0.42 || el > 0.33 + (fbm(az * 9, 2) - 0.5) * 0.2) continue
-        const across = VEIL.size * range(0.9, 1.3)
-        farDabs.face({ at: [x + range(-0.5, 0.5) * VEIL.step, y + range(-0.5, 0.5) * VEIL.step, VEIL.z + range(-30, 30)], dir: [1, range(-0.25, 0.25), 0], size: [across, across * range(1.6, 2.4)], color, lift: 0 })
-      }
-    }
-  }
-
   // the underpainting of the valley is what stands in the sun's way
   const under = canvas.under.build()
   under.layers.enable(CASTER_LAYER)
-  scene.add(under, far.under.build(KINDS.far))
-  scene.add(canvas.solid.build(KINDS.solid), canvas.wood.build(KINDS.wood), canvas.leaves.build(KINDS.leaves), canvas.blades.build(KINDS.blades), farDabs.build(KINDS.far))
+  scene.add(under, far.under.build({ ...KINDS.far, pushBack: true }))
+  // far strokes are drawn after the valley, so the depth of what stands before them cuts them
+  const farStrokes = farDabs.build(KINDS.far)
+  farStrokes.renderOrder = 5
+  scene.add(canvas.solid.build(KINDS.solid), canvas.wood.build(KINDS.wood), canvas.leaves.build(KINDS.leaves), canvas.blades.build(KINDS.blades), farStrokes)
+  scene.add(buildFlyingLeaves({ ...FLYING_LEAVES, rand }))
 
   return {
     scene,
