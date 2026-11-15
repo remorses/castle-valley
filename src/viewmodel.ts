@@ -1,8 +1,9 @@
 // First-person hands as pixel sprites, drawn over the world like Doom weapons.
-// The sprites are cut from the reference painting (scripts/cut-sprite.ts): one sprite pixel is one render pixel.
+// The sprites are cut from the reference painting (scripts/cut-sprite.ts). The scene is measured in pixels of the
+// reference frame, 270 on the short side of the screen, and each sprite pixel is one of them.
 // Each sprite has a margin of extra arm past the screen edge, so it can bob and swing without showing a cut.
 import * as THREE from 'three'
-import { hex, shared, splatGeometry, splatMaterial } from './paint.ts'
+import { hex, shared } from './paint.ts'
 
 /** render size of the reference frame the sprites were cut from */
 const REFERENCE = { width: 270, height: 405 }
@@ -88,19 +89,35 @@ interface Spark {
   life: number
 }
 
+const SPARK_VERTEX = /* glsl */ `
+attribute vec3 aPos;
+attribute vec3 aColor;
+varying vec3 vColor;
+void main() {
+  vColor = aColor;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(aPos + position, 1.0);
+}
+`
+
+const SPARK_FRAGMENT = /* glsl */ `
+varying vec3 vColor;
+void main() { gl_FragColor = vec4(vColor, 1.0); }
+`
+
 /** a few one-pixel sparks that rise from the flame. Positions are in torch sprite pixels */
 function buildSparks() {
-  const geometry = splatGeometry(SPARK_COUNT)
+  const geometry = new THREE.InstancedBufferGeometry()
+  const quad = new THREE.PlaneGeometry(1, 1)
+  geometry.index = quad.index
+  geometry.setAttribute('position', quad.attributes.position)
+  geometry.instanceCount = SPARK_COUNT
   const pos = new THREE.InstancedBufferAttribute(new Float32Array(SPARK_COUNT * 3), 3).setUsage(THREE.DynamicDrawUsage)
   const color = new THREE.InstancedBufferAttribute(new Float32Array(SPARK_COUNT * 3), 3).setUsage(THREE.DynamicDrawUsage)
   geometry.setAttribute('aPos', pos)
-  geometry.setAttribute('aSize', new THREE.InstancedBufferAttribute(new Float32Array(SPARK_COUNT).fill(1), 1))
   geometry.setAttribute('aColor', color)
-  // the camera is orthographic in pixel units: a pixel is 1 unit at any depth
-  const mesh = new THREE.Mesh(geometry, splatMaterial({ pixel: { value: 1 } }))
+  const mesh = new THREE.Mesh(geometry, new THREE.ShaderMaterial({ vertexShader: SPARK_VERTEX, fragmentShader: SPARK_FRAGMENT, depthTest: false }))
   mesh.frustumCulled = false
-  // in front of the sprite, and drawn after it: the sprite ignores depth
-  mesh.position.z = -1
+  // drawn after the sprite
   mesh.renderOrder = 1
 
   const [left, bottom, right, top] = TORCH.flame
@@ -135,7 +152,7 @@ function buildSparks() {
 
 export function buildViewModel() {
   const scene = new THREE.Scene()
-  // pixel units of the render target, y up
+  // reference pixels, y up
   const camera = new THREE.OrthographicCamera(0, 1, 1, 0, -10, 10)
 
   const torch = new THREE.Group()
@@ -156,7 +173,7 @@ export function buildViewModel() {
   return {
     scene,
     camera,
-    /** size of the render target in pixels */
+    /** size of the screen in reference pixels */
     resize(renderWidth: number, renderHeight: number) {
       camera.right = renderWidth
       camera.top = renderHeight

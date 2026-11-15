@@ -1,16 +1,18 @@
-// The valley: terrain, forest, village, castle on its crag, mountains and sky.
+// The valley: ground, forest, village, castle on its crag, mountains and sky, all painted in dabs.
 // Layout (top view, the player starts in the forest and looks toward -Z):
 //
 //   mountains ......... z -1300 .. -3400
+//   cloud veil ........ z -1560
 //   castle crag ....... z -900
-//   mist bank ......... z -730
-//   far hills ......... z -450 .. -650
-//   church knoll ...... z -320
-//   village ........... z -120 .. -280
+//   mist bank ......... z -600
+//   far hills ......... z -300 .. -480
+//   church knoll ...... z -226
+//   village ........... z -80 .. -200
 //   forest edge ....... z 0
 //   start ............. z 14
 import * as THREE from 'three'
-import { LIGHT_DIR, Parts, R, Splats, hex, cloudVeilMaterial, mistMaterial, paintMaterial, skyMaterial, terrainMaterial, tone, type RGB, type RampName } from './paint.ts'
+import { Dabs, Parts, billow, clamp, fbm, hex, lerp, lightOn, mixColor, mulberry, noise, paint, ridged, smooth, tone, underMaterial } from './paint.ts'
+import type { RGB, Scatter, Style, Vec3 } from './paint.ts'
 
 export interface Collider {
   x: number
@@ -18,70 +20,10 @@ export interface Collider {
   r: number
 }
 
-const EYE_START = { x: 0, z: 14 }
+const EYE_START = { x: 0, y: 1.7, z: 14 }
 const CRAG = { x: -55, z: -900, top: 178 }
 const HOUSE_SCALE = 0.85
-const HAZE = { color: '#1f2a3e', start: 130, end: 430, max: 0.5 }
-
-// ---------- math ----------
-
-const clamp = (x: number, a: number, b: number) => Math.min(b, Math.max(a, x))
-const lerp = (a: number, b: number, t: number) => a + (b - a) * t
-function smooth(a: number, b: number, x: number) {
-  const t = clamp((x - a) / (b - a), 0, 1)
-  return t * t * (3 - 2 * t)
-}
-
-function mulberry(seed: number) {
-  let a = seed >>> 0
-  return () => {
-    a = (a + 0x6d2b79f5) >>> 0
-    let t = a
-    t = Math.imul(t ^ (t >>> 15), t | 1)
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
-  }
-}
-
-function hash2(x: number, y: number) {
-  let h = Math.imul(x | 0, 374761393) + Math.imul(y | 0, 668265263)
-  h = Math.imul(h ^ (h >>> 13), 1274126177)
-  return ((h ^ (h >>> 16)) >>> 0) / 4294967296
-}
-
-function noise(x: number, y: number) {
-  const ix = Math.floor(x)
-  const iy = Math.floor(y)
-  let fx = x - ix
-  let fy = y - iy
-  fx = fx * fx * (3 - 2 * fx)
-  fy = fy * fy * (3 - 2 * fy)
-  return lerp(lerp(hash2(ix, iy), hash2(ix + 1, iy), fx), lerp(hash2(ix, iy + 1), hash2(ix + 1, iy + 1), fx), fy)
-}
-
-function fbm(x: number, y: number, octaves = 4) {
-  let amp = 0.5
-  let sum = 0
-  for (let i = 0; i < octaves; i++) {
-    sum += amp * noise(x, y)
-    x = x * 2.03 + 17.1
-    y = y * 2.03 + 9.7
-    amp *= 0.5
-  }
-  return sum
-}
-
-function ridged(x: number, y: number) {
-  let amp = 0.5
-  let sum = 0
-  for (let i = 0; i < 4; i++) {
-    sum += amp * (1 - Math.abs(noise(x, y) * 2 - 1))
-    x = x * 2.1 + 5.3
-    y = y * 2.1 + 3.1
-    amp *= 0.5
-  }
-  return sum
-}
+const HEAD_ROOM = 2.2
 
 // ---------- terrain height ----------
 
@@ -119,7 +61,8 @@ function axis(d: number) {
 /** The valley is a funnel: a narrow hollow at the forest edge that opens toward the village. */
 const valleyHalfWidth = (d: number) => lerp(18, 70, smooth(-14, 110, d))
 
-const bump = (dx: number, rx: number, dz: number, rz: number) => Math.exp(-(dx * dx) / (rx * rx) - (dz * dz) / (rz * rz))
+/** a round hill: 1 at its middle, fading over the radii rx and rz */
+const bump = ({ dx, rx, dz, rz }: { dx: number; rx: number; dz: number; rz: number }) => Math.exp(-(dx * dx) / (rx * rx) - (dz * dz) / (rz * rz))
 
 export function groundHeight(x: number, z: number) {
   const d = FOREST_EDGE - z
@@ -129,7 +72,7 @@ export function groundHeight(x: number, z: number) {
   const rim = 9 + 10 * fbm(x * 0.008 + 3, z * 0.008 + 7) + 8 * smooth(1, 2.6, u) - 26 * far
   const wall = Math.pow(smooth(0.2, 1.05, u), 1.25)
   let h = a + Math.max(rim - a, 0) * wall
-  h += far * (4 * bump(x + 150, 170, d - 400, 110) + 10 * bump(x - 200, 220, d - 420, 130))
+  h += far * (4 * bump({ dx: x + 150, rx: 170, dz: d - 400, rz: 110 }) + 10 * bump({ dx: x - 200, rx: 220, dz: d - 420, rz: 130 }))
   h += (fbm(x * 0.05, z * 0.05) - 0.5) * 2.2 * smooth(0.15, 0.6, u)
   return h
 }
@@ -179,7 +122,7 @@ function pathXAt(z: number) {
 
 const ZONE = { minX: -256, minZ: -420, size: 512, res: 1024 }
 
-/** Zone map. r: path, g: open lit ground (meadows and path sides), b: forest shade. */
+/** Zone map, read when the world is painted. r: path, g: open lit ground (meadows and path sides), b: forest shade. */
 function buildZones() {
   const canvas = document.createElement('canvas')
   canvas.width = canvas.height = ZONE.res
@@ -192,7 +135,7 @@ function buildZones() {
   ctx.globalCompositeOperation = 'lighter'
   ctx.lineCap = ctx.lineJoin = 'round'
 
-  const stroke = (points: Point[], width: number, color: string) => {
+  const stroke = ({ points, width, color }: { points: Point[]; width: number; color: string }) => {
     ctx.strokeStyle = color
     ctx.lineWidth = width * scale
     ctx.beginPath()
@@ -211,16 +154,15 @@ function buildZones() {
     ctx.fillRect(-1, -1, 2, 2)
     ctx.restore()
   }
-  // a lit clearing follows the main path through the forest
   // the grass beside the path is lit from the forest edge down
   const litPath = mainPath.filter(([, z]) => z < 11)
-  stroke(litPath, 6.5, 'rgb(0,45,0)')
-  stroke(litPath, 3.8, 'rgb(0,45,0)')
-  stroke(mainPath, 1.8, 'rgb(255,0,0)')
+  stroke({ points: litPath, width: 6.5, color: 'rgb(0,45,0)' })
+  stroke({ points: litPath, width: 3.8, color: 'rgb(0,45,0)' })
+  stroke({ points: mainPath, width: 1.8, color: 'rgb(255,0,0)' })
   for (const branch of BRANCH_PATHS) {
     const points = smoothPath(branch)
-    stroke(points, 7, 'rgb(0,40,0)')
-    stroke(points, 1.4, 'rgb(255,0,0)')
+    stroke({ points, width: 7, color: 'rgb(0,40,0)' })
+    stroke({ points, width: 1.4, color: 'rgb(255,0,0)' })
   }
 
   const image = ctx.getImageData(0, 0, ZONE.res, ZONE.res)
@@ -237,9 +179,6 @@ function buildZones() {
       data[(j * ZONE.res + i) * 4 + 2] = Math.round(255 * Math.max(wall, forest, far))
     }
   }
-  const texture = new THREE.DataTexture(new Uint8Array(data.buffer), ZONE.res, ZONE.res, THREE.RGBAFormat)
-  texture.magFilter = texture.minFilter = THREE.LinearFilter
-  texture.needsUpdate = true
 
   /** [path, open, shade] in 0..1 at a world position */
   const sample = (x: number, z: number): RGB => {
@@ -249,41 +188,271 @@ function buildZones() {
     const k = (j * ZONE.res + i) * 4
     return [data[k] / 255, data[k + 1] / 255, data[k + 2] / 255]
   }
-  return { texture, sample }
+  return { sample }
+}
+
+const PATH_FIELD = { minX: -126, minZ: -250, cell: 2, columns: 126, rows: 176 }
+
+/** Distance to the nearest path in metres, from a coarse grid. Far from every path it returns a large number. */
+function buildPathDistance() {
+  // points every half metre or so along every path
+  const points: Point[] = []
+  for (const path of [mainPath, ...BRANCH_PATHS.map(smoothPath)]) {
+    for (let i = 0; i < path.length - 1; i++) {
+      for (let k = 0; k < 3; k++) points.push([lerp(path[i][0], path[i + 1][0], k / 3), lerp(path[i][1], path[i + 1][1], k / 3)])
+    }
+  }
+  const { minX, minZ, cell, columns, rows } = PATH_FIELD
+  const field = new Float32Array((columns + 1) * (rows + 1))
+  for (let j = 0; j <= rows; j++) {
+    for (let i = 0; i <= columns; i++) {
+      let best = Infinity
+      for (const [px, pz] of points) {
+        const dx = px - (minX + i * cell)
+        const dz = pz - (minZ + j * cell)
+        best = Math.min(best, dx * dx + dz * dz)
+      }
+      field[j * (columns + 1) + i] = Math.sqrt(best)
+    }
+  }
+  return (x: number, z: number) => {
+    const fx = (x - minX) / cell
+    const fz = (z - minZ) / cell
+    if (fx < 0 || fz < 0 || fx >= columns || fz >= rows) return 1000
+    const i = Math.floor(fx)
+    const j = Math.floor(fz)
+    const k = j * (columns + 1) + i
+    const top = lerp(field[k], field[k + 1], fx - i)
+    const bottom = lerp(field[k + columns + 1], field[k + columns + 2], fx - i)
+    return lerp(top, bottom, fz - j)
+  }
+}
+
+// ---------- colours by place ----------
+
+const HAZE = hex('#1f2a3e')
+const MIST = hex('#393a61')
+const JOINT = hex('#17110f')
+const FLOWER = hex('#a3512c')
+
+/** what shows where no dab reaches: the mist below the horizon */
+export const BACKDROP = hex('#292951')
+
+/** Far things fade into blue haze. Measured from the middle of the valley, so it is fixed in the world. */
+function haze(color: RGB, [x, , z]: Vec3): RGB {
+  const k = clamp((Math.hypot(x, z + 40) - 110) / 270, 0, 1) * 0.5
+  return k > 0 ? mixColor(color, HAZE, k) : color
+}
+
+/** mist that rises to about `top` metres, give or take `feather`, and swallows what stands in it */
+const mistBelow =
+  ({ top, feather, most }: { top: number; feather: number; most: number }) =>
+  (color: RGB, [x, y, z]: Vec3): RGB => {
+    const edge = y + (fbm(x * 0.012, z * 0.012) - 0.5) * feather * 2
+    return mixColor(color, MIST, smooth(top + feather, top - feather, edge) * most)
+  }
+
+// ---------- sky ----------
+
+// cloud value thresholds and their tones, light to dark
+const SKY_TONES: [number, RGB][] = [
+  [0.7, hex('#887f71')],
+  [0.61, hex('#756b70')],
+  [0.54, hex('#6a606e')],
+  [0.45, hex('#5d526a')],
+  [0.33, hex('#464363')],
+  [0.2, hex('#302f56')],
+]
+const SKY_DARKEST = hex('#1a1830')
+const SKY_GREEN = hex('#4e6161')
+
+function cloud(x: number, y: number) {
+  const warp = fbm(x * 0.8 + 3.1, y * 0.8 + 8.2)
+  return fbm(x * 1.05 + warp * 1.7, y * 1.05 + warp) * 0.62 + (1 - billow(x * 1.7 + 2, y * 1.7 + 2)) * 0.38
+}
+
+/**
+ * The sky in a direction: az from -Z toward +X, el up, radians. chance in 0..1 frays the edges.
+ * f is how thick the cloud is there.
+ */
+function skyAt({ az, el, chance }: { az: number; el: number; chance: number }) {
+  const x = az * 3.6
+  const y = el * 4.4
+  const body = cloud(x, y)
+  // cumulus shading: edges that face the light, up and to the left, are bright; the far side is dark
+  const lit = clamp((body - cloud(x - 0.07, y + 0.1)) * 8, -0.12, 0.24)
+  let f = (body - 0.53) * 1.45 + 0.46 + lit + (fbm(x * 5 + 5, y * 5 + 5) - 0.5) * 0.1
+  // bright bank above the castle, darker to the right and near the horizon
+  f += 0.17 * Math.exp(-((az + 0.2) ** 2 * 2.2 + (el - 0.62) ** 2 * 5))
+  f -= 0.1 * smooth(-0.15, 0.45, az) + 0.04 * smooth(0.5, 0.05, el)
+  f += 0.06 * smooth(0.35, 1, el) + (chance - 0.5) * 0.03
+  let color = SKY_TONES.find(([edge]) => f > edge)?.[1] ?? SKY_DARKEST
+  if (f > 0.5 && f < 0.56 && fbm(x * 0.6 + 40, y * 0.6 + 40) > 0.66) color = SKY_GREEN
+  // below the horizon the valley is lost in mist
+  const low = smooth(0.02, -0.12, el + (fbm(az * 6, 1) - 0.5) * 0.06)
+  if (chance < low) color = BACKDROP
+  return { f, color }
+}
+
+const SKY_RADIUS = 6000
+// angle between rows of sky dabs
+const SKY_STEP = 0.0078
+
+function buildSky(rand: () => number) {
+  const dabs = new Dabs()
+  for (let el = -0.3; el < 1.55; el += SKY_STEP) {
+    const count = Math.ceil((Math.PI * 2 * Math.cos(el)) / SKY_STEP)
+    for (let i = 0; i < count; i++) {
+      const az = ((i + rand()) / count) * Math.PI * 2 - Math.PI
+      const e = el + (rand() - 0.5) * SKY_STEP * 2
+      const flat = Math.cos(e) * SKY_RADIUS
+      const { color } = skyAt({ az, el: e, chance: rand() })
+      dabs.face({ at: [Math.sin(az) * flat, Math.sin(e) * SKY_RADIUS, -Math.cos(az) * flat], size: SKY_RADIUS * SKY_STEP * lerp(1.7, 2.5, rand()), color })
+    }
+  }
+  return dabs.build()
+}
+
+// ---------- ground ----------
+
+const GROUND = { minX: -460, maxX: 460, minZ: -700, maxZ: 120, step: 2.5 }
+// the part of the ground with paths, painted in fine strokes
+const NEAR = { minX: -126, maxX: 126, minZ: -250, maxZ: 102 }
+
+// Strokes get coarser away from the paths, where the player rarely stands.
+// reach: up to this distance from a path. step: spacing across and along. size: stroke extents.
+const GROUND_BANDS: { reach: number; step: [number, number]; size: [number, number] }[] = [
+  { reach: 2.6, step: [0.22, 0.11], size: [0.3, 0.16] },
+  { reach: 8, step: [0.34, 0.15], size: [0.46, 0.22] },
+  { reach: 25, step: [0.6, 0.28], size: [0.8, 0.44] },
+  { reach: Infinity, step: [1.4, 0.7], size: [1.8, 1.1] },
+]
+const FAR_GROUND = { step: 3.4, size: 3.8 }
+const UNDER_GROUND_DROP = 0.3
+
+interface GroundOptions {
+  zones: ReturnType<typeof buildZones>
+  pathDistance: (x: number, z: number) => number
+  dabs: Dabs
+  rand: () => number
+}
+
+/** The under mesh of the ground. Its strokes go into `dabs`. */
+function buildGround({ zones, pathDistance, dabs, rand }: GroundOptions) {
+  const { minX, maxX, minZ, maxZ, step } = GROUND
+  const nx = Math.round((maxX - minX) / step) + 1
+  const nz = Math.round((maxZ - minZ) / step) + 1
+  const heights = new Float32Array(nx * nz)
+  for (let j = 0; j < nz; j++) {
+    for (let i = 0; i < nx; i++) heights[j * nx + i] = groundHeight(minX + i * step, minZ + j * step)
+  }
+  // height from the grid, so dabs sit on the under mesh
+  const heightAt = (x: number, z: number) => {
+    const fx = clamp((x - minX) / step, 0, nx - 1.001)
+    const fz = clamp((z - minZ) / step, 0, nz - 1.001)
+    const i = Math.floor(fx)
+    const j = Math.floor(fz)
+    const k = j * nx + i
+    return lerp(lerp(heights[k], heights[k + 1], fx - i), lerp(heights[k + nx], heights[k + nx + 1], fx - i), fz - j)
+  }
+  const normalAt = (x: number, z: number): Vec3 => {
+    const dx = heightAt(x + 1.25, z) - heightAt(x - 1.25, z)
+    const dz = heightAt(x, z + 1.25) - heightAt(x, z - 1.25)
+    const length = Math.hypot(dx, 2.5, dz)
+    return [-dx / length, 2.5 / length, -dz / length]
+  }
+
+  /** spread, edge and pick are chances in 0..1: the tone, the ragged zone edges, and the rare odd stroke */
+  const colorAt = ({ x, z, light, spread, edge, pick }: { x: number; z: number; light: number; spread: number; edge: number; pick: number }): RGB => {
+    const [path, open, forest] = zones.sample(x, z)
+    const at: Vec3 = [x, 0, z]
+    if (path + (edge - 0.5) * 0.3 > 0.5) {
+      // cobbles, with dark joints and a mossy stone now and then
+      if (pick < 0.04) return JOINT
+      if (pick > 0.96) return tone('grass', 0.3 + spread * 0.4)
+      return haze(tone('path', 0.44 + (spread - 0.5) * 0.9), at)
+    }
+    const shade = forest * (1 - smooth(0.1, 0.32, open))
+    const t = -0.06 + (light - 0.5) * 1.1 + open * 0.8 + (fbm(x * 0.045, z * 0.045) - 0.5) * 0.55 + (spread - 0.5) * 0.85
+    if (shade + (edge - 0.5) * 0.3 > 0.5) return haze(tone('forestFloor', t * 0.9 + 0.22 - shade * 0.25), at)
+    if (pick > 0.994 && open > 0.1) return FLOWER
+    return haze(tone('grass', t + 0.12), at)
+  }
+
+  // under mesh
+  const position = new Float32Array(nx * nz * 3)
+  const color = new Float32Array(nx * nz * 3)
+  for (let j = 0; j < nz; j++) {
+    for (let i = 0; i < nx; i++) {
+      const x = minX + i * step
+      const z = minZ + j * step
+      // a little below the strokes, so none of them is buried where the ground curves
+      position.set([x, heights[j * nx + i] - UNDER_GROUND_DROP, z], (j * nx + i) * 3)
+      color.set(colorAt({ x, z, light: lightOn(...normalAt(x, z)), spread: 0.4, edge: 0.5, pick: 0.5 }), (j * nx + i) * 3)
+    }
+  }
+  const index = new Uint32Array((nx - 1) * (nz - 1) * 6)
+  for (let j = 0, k = 0; j < nz - 1; j++) {
+    for (let i = 0; i < nx - 1; i++, k += 6) {
+      const a = j * nx + i
+      index.set([a, a + nx, a + 1, a + 1, a + nx, a + nx + 1], k)
+    }
+  }
+  const geometry = new THREE.BufferGeometry()
+  geometry.setAttribute('position', new THREE.BufferAttribute(position, 3))
+  geometry.setAttribute('aColor', new THREE.BufferAttribute(color, 3))
+  geometry.setIndex(new THREE.BufferAttribute(index, 1))
+  const mesh = new THREE.Mesh(geometry, underMaterial())
+  mesh.frustumCulled = false
+
+  // strokes: rows across the path, like cobbles and mown grass
+  const stroke = ({ x, z, size }: { x: number; z: number; size: [number, number] }) => {
+    const normal = normalAt(x, z)
+    const rgb = colorAt({ x, z, light: lightOn(...normal), spread: rand(), edge: rand(), pick: rand() })
+    const k = 0.8 + rand() * 0.45
+    // lifted off the ground, each by its own amount: where two overlap, the same one is always on top
+    const y = heightAt(x, z) + size[1] * (0.1 + rand() * 0.5)
+    dabs.lie({ at: [x, y, z], normal, ex: size[0] * k, ey: size[1] * k, turn: (rand() - 0.5) * 0.5, color: rgb })
+  }
+  let inner = 0
+  for (const band of GROUND_BANDS) {
+    const [sx, sz] = band.step
+    for (let z = NEAR.minZ; z < NEAR.maxZ; z += sz) {
+      for (let x = NEAR.minX; x < NEAR.maxX; x += sx) {
+        const px = x + rand() * sx
+        const pz = z + rand() * sz
+        const d = pathDistance(px, pz)
+        if (d >= inner && d < band.reach) stroke({ x: px, z: pz, size: band.size })
+      }
+    }
+    inner = band.reach
+  }
+  for (let z = minZ; z < maxZ; z += FAR_GROUND.step) {
+    for (let x = minX; x < maxX; x += FAR_GROUND.step) {
+      const px = x + rand() * FAR_GROUND.step
+      const pz = z + rand() * FAR_GROUND.step
+      if (px > NEAR.minX && px < NEAR.maxX && pz > NEAR.minZ && pz < NEAR.maxZ) continue
+      stroke({ x: px, z: pz, size: [FAR_GROUND.size, FAR_GROUND.size] })
+    }
+  }
+  return mesh
 }
 
 // ---------- geometry helpers ----------
 
-/** Unit fir: five stacked skirts, 1 wide at the base and 2 tall. Each skirt is darker toward its rim. */
+/** Unit fir for the under mesh: five stacked skirts, 1 wide at the base and about 2 tall. */
 function coniferGeometry() {
   const TIERS = 5
-  const position: number[] = []
-  const normal: number[] = []
-  const bias: number[] = []
+  const fir = new Parts()
   for (let i = 0; i < TIERS; i++) {
     const t = i / TIERS
-    const radius = lerp(1, 0.3, t)
-    const height = 0.62
-    const cone = new THREE.ConeGeometry(radius, height, 7, 1, true).toNonIndexed()
-    cone.rotateY(i * 0.7).translate(0, t * 1.75 + height / 2, 0)
-    const p = cone.attributes.position
-    for (let v = 0; v < p.count; v++) {
-      position.push(p.getX(v), p.getY(v), p.getZ(v))
-      normal.push(cone.attributes.normal.getX(v), cone.attributes.normal.getY(v), cone.attributes.normal.getZ(v))
-      const rim = 1 - (p.getY(v) - t * 1.75) / height
-      bias.push(0.1 - rim * 0.34 + t * 0.08)
-    }
+    fir.add(new THREE.ConeGeometry(lerp(1, 0.3, t), 0.62, 7, 1, true).rotateY(i * 0.7).translate(0, t * 1.75 + 0.31, 0), { ramp: 'conifer' })
   }
-  const geometry = new THREE.BufferGeometry()
-  geometry.setAttribute('position', new THREE.Float32BufferAttribute(position, 3))
-  geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normal, 3))
-  geometry.setAttribute('aTone', new THREE.Float32BufferAttribute(bias, 1))
-  geometry.setAttribute('aRamp', new THREE.Float32BufferAttribute(new Array(bias.length).fill(R.conifer), 1))
-  return geometry
+  return fir.geometry()
 }
 
-/** A lumpy ellipsoid: the solid core of a tree crown or bush. */
-function blobGeometry(cx: number, cy: number, cz: number, rx: number, ry: number, rz: number, seed: number, detail: number) {
+/** A lumpy ellipsoid: the solid core of a tree crown or bush. detail: subdivisions of the sphere. */
+function blobGeometry({ center, radius, seed, detail }: { center: Vec3; radius: Vec3; seed: number; detail: number }) {
   const geometry = new THREE.IcosahedronGeometry(1, detail)
   const position = geometry.attributes.position
   const normal = geometry.attributes.normal
@@ -292,37 +461,62 @@ function blobGeometry(cx: number, cy: number, cz: number, rx: number, ry: number
     const y = position.getY(i)
     const z = position.getZ(i)
     const k = 0.6 + 0.8 * fbm(x * 2.6 + seed, y * 2.6 + z * 1.9 + seed * 0.7, 3)
-    position.setXYZ(i, cx + x * rx * k, cy + y * ry * k, cz + z * rz * k)
+    position.setXYZ(i, center[0] + x * radius[0] * k, center[1] + y * radius[1] * k, center[2] + z * radius[2] * k)
     normal.setXYZ(i, x, y, z)
   }
   return geometry
 }
 
-interface BlobSplatOptions {
-  ramp: RampName
-  count: number
-  size: [number, number]
-  base: number
-  light: number
-  noise: number
-  /** occasional dabs in another colour: flowers, bright leaves */
-  accent?: { color: RGB; chance: number }
+/** A roof with two slopes, ridge along z. w wide, h high, d deep. Its foot is at y 0. */
+function gableRoof({ w, h, d }: { w: number; h: number; d: number }) {
+  const x = w / 2
+  const z = d / 2
+  const v = [-x, 0, -z, x, 0, -z, 0, h, -z, -x, 0, z, x, 0, z, 0, h, z]
+  // faces wound to point outward: the light is taken from their normals
+  const faces = [0, 2, 1, 3, 4, 5, 0, 5, 2, 0, 3, 5, 1, 5, 4, 1, 2, 5]
+  const position = new Float32Array(faces.flatMap((i) => v.slice(i * 3, i * 3 + 3)))
+  const geometry = new THREE.BufferGeometry()
+  geometry.setAttribute('position', new THREE.BufferAttribute(position, 3))
+  return geometry
 }
 
-function blobSplats(splats: Splats, rand: () => number, c: [number, number, number], r: [number, number, number], options: BlobSplatOptions) {
-  for (let i = 0; i < options.count; i++) {
-    const y = rand() * 2 - 1
-    const angle = rand() * Math.PI * 2
-    const s = Math.sqrt(1 - y * y)
-    const dx = Math.cos(angle) * s
-    const dz = Math.sin(angle) * s
-    const k = 0.92 + rand() * rand() * 0.5
-    const light = (dx * LIGHT_DIR.x + y * LIGHT_DIR.y + dz * LIGHT_DIR.z) * 0.5 + 0.5
-    const t = options.base + light * options.light + (rand() - 0.5) * options.noise
-    const color = options.accent && rand() < options.accent.chance ? options.accent.color : tone(options.ramp, t)
-    splats.add(c[0] + dx * r[0] * k, c[1] + y * r[1] * k, c[2] + dz * r[2] * k, lerp(options.size[0], options.size[1], rand()), color)
-  }
+/** how closely a thing in the start forest is seen: sets how fine it is painted */
+type Tier = 'near' | 'mid' | 'far'
+function tierAt(x: number, z: number): Tier {
+  const distance = Math.hypot(x - EYE_START.x, z - 6)
+  return distance < 22 ? 'near' : distance < 45 ? 'mid' : 'far'
 }
+
+// ---------- styles: how each kind of thing is painted ----------
+
+const CROWN_STYLE: Style = { base: 0.02, light: 0.6, noise: 0.45, clump: [0.9, 0.9], smooth: true, under: -0.35 }
+const CROWN_SCATTER: Record<Tier, Scatter> = {
+  near: { density: 14, size: [0.1, 0.24], lift: 2.5 },
+  mid: { density: 2.5, size: [0.22, 0.44], lift: 2 },
+  far: { density: 0.5, size: [0.6, 1], lift: 1.5 },
+}
+const TRUNK_STYLE: Style = { base: -0.02, light: 0.5, noise: 0.9, smooth: true }
+const TRUNK_SCATTER: Scatter = { density: 16, size: [0.45, 0.9], lie: { aspect: 0.16, turn: 0.12 } }
+const BUSH_STYLE: Style = { base: 0.08, light: 0.8, noise: 0.45, clump: [0.5, 0.5], smooth: true, under: -0.2 }
+const HERO_BUSH_SCATTER: Scatter = { density: 140, size: [0.035, 0.09], lift: 1.5 }
+const WILD_BUSH_SCATTER: Scatter = { density: 30, size: [0.06, 0.14], lift: 1.2 }
+const FLOWERS = { colors: [hex('#808c80'), hex('#58655a')], chance: 0.16 }
+const LEAFY_STYLE: Style = { base: -0.06, light: 0.85, noise: 0.4, clump: [0.5, 1.4], smooth: true, under: -0.2, tint: haze }
+const LEAFY_SCATTER: Record<'near' | 'far', Scatter> = {
+  near: { density: 16, size: [0.12, 0.26], lift: 1 },
+  far: { density: 7, size: [0.2, 0.4], lift: 1 },
+}
+const BUILDING_STYLE: Style = { base: -0.06, light: 0.92, noise: 0.22, under: -0.05, tint: haze }
+const BUILDING_SCATTER: Scatter = { density: 4.4, size: [0.3, 0.5], lie: { aspect: 1.9, turn: 0.06 } }
+const CASTLE_STYLE: Style = { base: -0.02, light: 0.9, noise: 0.45, clump: [0.3, 40] }
+const CASTLE_SCATTER: Scatter = { density: 0.16, size: [2.6, 4.2], lie: { aspect: 0.7, turn: 0.05 } }
+const CRAG_MIST = mistBelow({ top: -30, feather: 30, most: 1 })
+const CRAG_STYLE: Style = { base: -0.3, light: 1.2, noise: 0.4, clump: [0.6, 30], tint: CRAG_MIST }
+const CRAG_SCATTER: Scatter = { density: 0.04, size: [5, 8], lift: 0.3 }
+const CRAG_FIR_STYLE: Style = { base: 0.05, light: 0.6, noise: 0.4, tint: CRAG_MIST }
+const CRAG_FIR_SCATTER: Scatter = { density: 0.02, size: [5, 8] }
+const MOUNTAIN_STYLE: Style = { base: -0.45, light: 1.4, noise: 0.35, clump: [0.75, 70], tint: mistBelow({ top: 230, feather: 200, most: 0.85 }) }
+const MOUNTAIN_SCATTER: Scatter = { density: 0.0028, size: [18, 30], lift: 0.3 }
 
 // ---------- world ----------
 
@@ -333,86 +527,47 @@ export function buildWorld() {
   const rand = mulberry(20260715)
   const range = (a: number, b: number) => lerp(a, b, rand())
 
-  // sky
-  const sky = new THREE.Mesh(new THREE.SphereGeometry(1, 24, 16), skyMaterial())
-  sky.frustumCulled = false
+  // Dabs are collected by how they behave: `solid` never moves, `leaves` sway in the wind.
+  const solid = new Dabs()
+  const leaves = new Dabs()
+
+  /** paints parts into the scene: the under mesh, and dabs when a scatter is given */
+  const add = (parts: Parts, options: { style: Style; scatter?: Scatter; dabs?: Dabs; offset?: THREE.Vector3 }) => {
+    if (parts.list.length > 0) scene.add(paint(parts, { ...options, rand }))
+  }
+
+  // the sky is painted on a far sphere that travels with the eye
+  const sky = buildSky(rand)
   sky.renderOrder = -10
   scene.add(sky)
-
-  // terrain
-  {
-    const minX = -460
-    const maxX = 460
-    const minZ = -700
-    const maxZ = 120
-    const step = 2.5
-    const nx = Math.round((maxX - minX) / step) + 1
-    const nz = Math.round((maxZ - minZ) / step) + 1
-    const position = new Float32Array(nx * nz * 3)
-    for (let j = 0; j < nz; j++) {
-      for (let i = 0; i < nx; i++) {
-        const x = minX + i * step
-        const z = minZ + j * step
-        position.set([x, groundHeight(x, z), z], (j * nx + i) * 3)
-      }
-    }
-    const index = new Uint32Array((nx - 1) * (nz - 1) * 6)
-    let k = 0
-    for (let j = 0; j < nz - 1; j++) {
-      for (let i = 0; i < nx - 1; i++) {
-        const a = j * nx + i
-        index.set([a, a + nx, a + 1, a + 1, a + nx, a + nx + 1], k)
-        k += 6
-      }
-    }
-    const geometry = new THREE.BufferGeometry()
-    geometry.setAttribute('position', new THREE.BufferAttribute(position, 3))
-    geometry.setIndex(new THREE.BufferAttribute(index, 1))
-    geometry.computeVertexNormals()
-    const count = nx * nz
-    geometry.setAttribute('aRamp', new THREE.BufferAttribute(new Float32Array(count), 1))
-    geometry.setAttribute('aTone', new THREE.BufferAttribute(new Float32Array(count), 1))
-    const terrain = new THREE.Mesh(geometry, terrainMaterial(zones.texture, [ZONE.minX, ZONE.minZ, ZONE.size, ZONE.size], HAZE))
-    terrain.frustumCulled = false
-    scene.add(terrain)
-  }
+  scene.add(buildGround({ zones, pathDistance: buildPathDistance(), dabs: solid, rand }))
 
   // ----- forest at the start: dark trunks, dark crowns that frame the view -----
-  const trunks = new Parts()
-  const crowns = new Parts()
-  const leaves = new Splats()
-  const foliage = new Splats()
+  const trunks = { near: new Parts(), far: new Parts() }
+  const crowns: Record<Tier, Parts> = { near: new Parts(), mid: new Parts(), far: new Parts() }
 
-  const crownLump = (x: number, y: number, z: number, rx: number, ry: number, rz: number) => {
-    const viewDistance = Math.hypot(x - EYE_START.x, z - 6)
-    crowns.add(blobGeometry(x, y, z, rx, ry, rz, rand() * 50, viewDistance < 45 ? 2 : 1), 'canopy')
-    const density = viewDistance < 22 ? 60 : viewDistance < 45 ? 16 : 4
-    blobSplats(leaves, rand, [x, y, z], [rx, ry, rz], {
-      ramp: 'canopy',
-      count: Math.round(rx * ry * density),
-      size: viewDistance < 22 ? [0.1, 0.22] : viewDistance < 45 ? [0.18, 0.34] : [0.3, 0.55],
-      base: 0.25,
-      light: 0.75,
-      noise: 0.7,
-      accent: { color: hex('#2a3a34'), chance: 0.07 },
-    })
+  const crownLump = (center: Vec3, radius: Vec3) => {
+    const tier = tierAt(center[0], center[2])
+    crowns[tier].add(blobGeometry({ center, radius, seed: rand() * 50, detail: tier === 'far' ? 1 : 2 }), { ramp: 'canopy' })
   }
   /** a crown: one core lump with smaller lumps around it, for a ragged outline */
-  const crownBlob = (x: number, y: number, z: number, rx: number, ry: number, rz: number) => {
-    crownLump(x, y, z, rx * 0.8, ry * 0.8, rz * 0.8)
-    for (let i = 0; i < 9; i++) {
+  const crownBlob = ([x, y, z]: Vec3, [rx, ry, rz]: Vec3) => {
+    crownLump([x, y, z], [rx * 0.8, ry * 0.8, rz * 0.8])
+    // far crowns are only seen as dark masses: fewer lumps
+    const lumps = tierAt(x, z) === 'far' ? 4 : 9
+    for (let i = 0; i < lumps; i++) {
       const angle = rand() * Math.PI * 2
       const lift = range(-0.7, 0.8)
       const reach = Math.sqrt(1 - lift * lift) * 0.72
       const k = range(0.38, 0.6)
-      crownLump(x + Math.cos(angle) * reach * rx, y + lift * 0.72 * ry, z + Math.sin(angle) * reach * rz, rx * k, ry * k * 0.6, rz * k)
+      crownLump([x + Math.cos(angle) * reach * rx, y + lift * 0.72 * ry, z + Math.sin(angle) * reach * rz], [rx * k, ry * k * 0.6, rz * k])
     }
   }
 
-  const bigTree = (x: number, z: number, radius: number, height: number, crown = true) => {
+  const bigTree = ({ x, z, radius, height, crown = true }: { x: number; z: number; radius: number; height: number; crown?: boolean }) => {
     const ground = groundHeight(x, z)
     const geometry = new THREE.CylinderGeometry(radius * 0.7, radius * 1.15, height, 8, 1, true)
-    trunks.add(geometry, 'bark', 0, new THREE.Matrix4().makeTranslation(x, ground + height / 2 - 1, z))
+    trunks[tierAt(x, z) === 'far' ? 'far' : 'near'].add(geometry, { ramp: 'bark', matrix: new THREE.Matrix4().makeTranslation(x, ground + height / 2 - 1, z) })
     colliders.push({ x, z, r: radius + 0.35 })
     if (!crown) return
     const blobs = 3 + Math.floor(rand() * 3)
@@ -421,37 +576,29 @@ export function buildWorld() {
       let bx = x + range(-2.6, 2.6)
       const bz = z + range(-2.6, 2.6)
       const by = ground + lerp(height * 0.28, height * 0.95, (i + rand()) / blobs)
-      // keep the sky open above the path
+      // keep the sky open above the path, except deep in the forest
       const px = pathXAt(bz)
       const gap = 4.2 + rx
       if (bz < 24 && Math.abs(bx - px) < gap) bx = px + Math.sign(bx - px || 1) * gap
-      crownBlob(bx, by, bz, rx, range(2, 3.6), rx * range(0.85, 1.15))
+      crownBlob([bx, by, bz], [rx, range(2, 3.6), rx * range(0.85, 1.15)])
     }
   }
 
   // hero trees and crowns that frame the first view
-  bigTree(-4.6, 3, 0.3, 34, false)
-  bigTree(-6.4, -4.5, 0.22, 30, false)
-  bigTree(5.5, 2, 0.26, 33, false)
-  bigTree(-8.5, 8, 0.6, 36)
-  bigTree(9, 7, 0.55, 35)
-  for (const [x, y, z, rx, ry, rz] of [
-    [-7.2, 9.5, 2, 4.4, 4.6, 4],
-    [-8.6, 16.5, 0, 5.4, 5, 5],
-    [-6, 5.8, -2, 2.3, 2.1, 2.3],
-    [-9.5, 23, 3, 6, 5, 5.5],
-    [-10, 4, 5, 3, 3.2, 3],
-    [7.6, 11, 1, 4.7, 5, 4.6],
-    [9.2, 18.5, -1, 5.6, 5, 5],
-    [7.6, 4.6, -3.5, 3, 3.6, 2.8],
-    [10, 25, 2, 6, 5, 5.5],
-    [10.5, 5, 4, 3.2, 3.6, 3],
-    [3.9, 3.2, 5, 1.9, 2.2, 1.9],
-    [4.7, 7.6, 3, 2.6, 2.6, 2.6],
+  bigTree({ x: -4.6, z: 3, radius: 0.3, height: 34, crown: false })
+  bigTree({ x: -6.4, z: -4.5, radius: 0.22, height: 30, crown: false })
+  bigTree({ x: 5.5, z: 2, radius: 0.26, height: 33, crown: false })
+  bigTree({ x: -8.5, z: 8, radius: 0.6, height: 36 })
+  bigTree({ x: 9, z: 7, radius: 0.55, height: 35 })
+  // x, height above ground, z, radii
+  // prettier-ignore
+  const heroCrowns = [
+    [-7.2, 9.5, 2, 4.4, 4.6, 4], [-8.6, 16.5, 0, 5.4, 5, 5], [-6, 5.8, -2, 2.3, 2.1, 2.3], [-9.5, 23, 3, 6, 5, 5.5],
+    [-10, 4, 5, 3, 3.2, 3], [7.6, 11, 1, 4.7, 5, 4.6], [9.2, 18.5, -1, 5.6, 5, 5], [7.6, 4.6, -3.5, 3, 3.6, 2.8],
+    [10, 25, 2, 6, 5, 5.5], [10.5, 5, 4, 3.2, 3.6, 3], [3.9, 3.2, 5, 1.9, 2.2, 1.9], [4.7, 7.6, 3, 2.6, 2.6, 2.6],
     [-4.3, 4.6, 4, 2.2, 2.8, 2.2],
-  ]) {
-    crownBlob(x, groundHeight(x, z) + y, z, rx, ry, rz)
-  }
+  ]
+  for (const [x, y, z, rx, ry, rz] of heroCrowns) crownBlob([x, groundHeight(x, z) + y, z], [rx, ry, rz])
 
   const treeSpots: Point[] = []
   for (let i = 0; i < 2600; i++) {
@@ -462,82 +609,70 @@ export function buildWorld() {
     if (open > 0.1 || Math.abs(x - pathXAt(z)) < 4.5 + 0.4 * Math.max(EYE_START.z - z, 0)) continue
     if (treeSpots.some(([tx, tz]) => Math.hypot(tx - x, tz - z) < 5.2)) continue
     treeSpots.push([x, z])
-    bigTree(x, z, range(0.28, 0.7), range(26, 38))
+    bigTree({ x, z, radius: range(0.28, 0.7), height: range(26, 38) })
   }
 
   // dark wall of forest behind and beside the start, so no sky shows between trunks
   {
     const wall = new THREE.CylinderGeometry(128, 128, 46, 72, 1, true, THREE.MathUtils.degToRad(-128), THREE.MathUtils.degToRad(256))
-    trunks.add(wall, 'bark', -0.12, new THREE.Matrix4().makeTranslation(0, 14, 18))
+    trunks.far.add(wall, { ramp: 'bark', bias: -0.12, matrix: new THREE.Matrix4().makeTranslation(0, 14, 18) })
   }
 
-  // ----- bushes -----
-  const shrubs = new Parts()
-  const bush = (x: number, z: number, size: number, flowers = false, bias = -0.18) => {
+  // ----- bushes: clusters of lumps -----
+  const bushes = { hero: new Parts(), flowering: new Parts(), wild: new Parts() }
+  const bush = ({ parts, x, z, size, bias, lumps }: { parts: Parts; x: number; z: number; size: number; bias: number; lumps: number }) => {
     const ground = groundHeight(x, z)
-    colliders.push({ x, z, r: size * 0.6 })
-    const flower = rand() < 0.5 ? hex('#808c80') : hex('#58655a')
-    for (let i = 0; i < 5; i++) {
+    colliders.push({ x, z, r: size * 1.1 })
+    for (let i = 0; i < lumps; i++) {
       const r = size * (i === 0 ? 0.75 : range(0.4, 0.6))
       const cx = x + (i === 0 ? 0 : range(-0.6, 0.6) * size)
       const cz = z + (i === 0 ? 0 : range(-0.6, 0.6) * size)
       const cy = ground + r * 0.7 + (i === 0 ? 0 : rand() * size * 0.5)
-      shrubs.add(blobGeometry(cx, cy, cz, r, r * 0.8, r, rand() * 50, 1), 'bushy', bias)
-      blobSplats(foliage, rand, [cx, cy, cz], [r, r * 0.8, r], {
-        ramp: 'bushy',
-        count: Math.round(r * r * 170),
-        size: [0.035, 0.09],
-        base: bias + 0.08,
-        light: 0.8,
-        noise: 0.45,
-        accent: flowers ? { color: flower, chance: 0.16 } : undefined,
-      })
+      parts.add(blobGeometry({ center: [cx, cy, cz], radius: [r, r * 0.8, r], seed: rand() * 50, detail: 1 }), { ramp: 'bushy', bias })
     }
   }
-  // dark undergrowth beside the path at the start: flowering on the left, as in the reference
+  // dark undergrowth beside the path at the start: flowering on the left, as in the reference. x, z, size, flowers
   // prettier-ignore
   const heroBushes: [number, number, number, boolean][] = [
     [-2.1, 10.6, 0.9, true], [-2.9, 8.6, 1.3, true], [-3.6, 6.4, 1.6, true], [-2.6, 4.2, 1.1, true], [-5.2, 8, 1.8, true],
     [2.1, 10.8, 0.9, false], [2.8, 8.8, 1.3, false], [3.4, 6.6, 1.7, false], [4.6, 4.4, 2.1, false], [3.2, 2.4, 1.4, false],
-    [5.6, 8, 2, false], [1.8, 12, 0.7, false], [-1.8, 12.1, 0.7, true], [-4.4, -6, 1.3, false], [-5.6, -9.5, 1.6, false], [5, -9, 1.4, false],
+    [5.6, 8, 2, false], [1.8, 12, 0.7, false], [-1.8, 12.1, 0.7, true], [-4.4, -6, 1.3, false], [-5.6, -9.5, 1.6, false],
+    [5, -9, 1.4, false],
   ]
-  for (const [x, z, size, flowers] of heroBushes) bush(x, z, size, flowers, z > 0 ? -0.4 : -0.2)
+  for (const [x, z, size, flowers] of heroBushes) bush({ parts: flowers ? bushes.flowering : bushes.hero, x, z, size, bias: z > 0 ? -0.4 : -0.2, lumps: 5 })
   for (let i = 0; i < 160; i++) {
     const z = range(-63, 60)
     const side = rand() < 0.5 ? -1 : 1
     const x = pathXAt(z) + side * range(3.2, 16)
-    const [path, , shade] = zones.sample(x, z)
+    const [path] = zones.sample(x, z)
     if (path > 0.05) continue
-    bush(x, z, range(0.6, 1.5), shade < 0.3 && rand() < 0.25)
+    bush({ parts: bushes.wild, x, z, size: range(0.6, 1.5), bias: -0.18, lumps: 3 })
   }
 
   // ----- round leafy trees of the valley -----
-  const leafyTree = (x: number, z: number, size: number) => {
+  const leafy = { near: new Parts(), far: new Parts() }
+  const leafyTree = ({ x, z, size }: { x: number; z: number; size: number }) => {
     const ground = groundHeight(x, z)
-    trunks.add(new THREE.CylinderGeometry(0.2 * size, 0.3 * size, 3.4 * size, 6, 1, true), 'bark', 0.25, new THREE.Matrix4().makeTranslation(x, ground + 1.4 * size, z))
+    const trunk = new THREE.CylinderGeometry(0.2 * size, 0.3 * size, 3.4 * size, 6, 1, true)
+    trunks.far.add(trunk, { ramp: 'bark', bias: 0.25, matrix: new THREE.Matrix4().makeTranslation(x, ground + 1.4 * size, z) })
     colliders.push({ x, z, r: 0.6 })
     const near = Math.abs(z) < 110
     const blobs = 3 + Math.floor(rand() * 3)
     for (let i = 0; i < blobs; i++) {
       const r = size * range(1.9, 3)
-      const c: [number, number, number] = [x + range(-1.8, 1.8) * size, ground + size * range(3.4, 6.2), z + range(-1.8, 1.8) * size]
-      shrubs.add(blobGeometry(c[0], c[1], c[2], r, r * 0.82, r, rand() * 50, near ? 2 : 1), 'bushy', near ? -0.1 : -0.24)
-      blobSplats(foliage, rand, c, [r, r * 0.82, r], {
-        ramp: 'bushy',
-        count: Math.round(r * r * (near ? 22 : 12)),
-        size: [0.12, 0.3],
-        base: near ? -0.08 : -0.22,
-        light: 0.85,
-        noise: 0.4,
-      })
+      // crowns stay above the player's head
+      const cy = ground + Math.max(size * range(3.4, 6.2), r + HEAD_ROOM)
+      const geometry = blobGeometry({ center: [x + range(-1.8, 1.8) * size, cy, z + range(-1.8, 1.8) * size], radius: [r, r * 0.82, r], seed: rand() * 50, detail: near ? 2 : 1 })
+      leafy[near ? 'near' : 'far'].add(geometry, { ramp: 'bushy', bias: near ? -0.1 : -0.24 })
     }
   }
+  // x, z, size
   // prettier-ignore
   const heroLeafy = [
     [-11, -78, 1.25], [-6, -72, 1.1], [-15, -85, 1.2], [10, -75, 1.3], [18, -70, 1.15], [22, -78, 1.3],
     [9, -66, 1], [-9, -45, 1.1], [8, -42, 1.2], [12, -49, 1], [-13, -53, 1.2],
   ]
-  for (const [x, z, size] of heroLeafy) leafyTree(x, z, size * 0.8)
+  for (const [x, z, size] of heroLeafy) leafyTree({ x, z, size: size * 0.8 })
   const leafySpots: Point[] = []
   for (let i = 0; i < 1500 && leafySpots.length < 45; i++) {
     const x = range(-62, 62)
@@ -546,32 +681,47 @@ export function buildWorld() {
     if (path > 0.02 || open > 0.3 || shade > 0.6) continue
     if (leafySpots.some(([tx, tz]) => Math.hypot(tx - x, tz - z) < 8)) continue
     leafySpots.push([x, z])
-    leafyTree(x, z, range(0.5, 0.8))
+    leafyTree({ x, z, size: range(0.5, 0.8) })
   }
 
-  // ----- conifers on the valley walls and the far hills -----
+  // ----- firs on the valley walls and the far hills -----
   {
-    const geometry = coniferGeometry()
     const matrices: THREE.Matrix4[] = []
-    const tones: number[] = []
-    const plant = (x: number, z: number, scale: number) => {
+    const colors: RGB[] = []
+    /** touches: how many dabs paint this fir. size: of one dab. dabs: which dabs they join */
+    const plant = ({ x, z, scale, touches, size, dabs }: { x: number; z: number; scale: number; touches: number; size: [number, number]; dabs: Dabs }) => {
       const height = scale * range(11, 16)
       const width = scale * range(2.3, 3.2)
-      const matrix = new THREE.Matrix4().makeRotationY(rand() * 6.28).scale(new THREE.Vector3(width, height / 2.1, width)).setPosition(x, groundHeight(x, z) - 0.6, z)
-      matrices.push(matrix)
-      tones.push(range(0.32, 0.68))
+      const ground = groundHeight(x, z) - 0.6
+      const lightness = range(-0.18, 0.18)
+      matrices.push(new THREE.Matrix4().makeRotationY(rand() * 6.28).scale(new THREE.Vector3(width, height / 2.1, width)).setPosition(x, ground, z))
+      colors.push(haze(tone('conifer', 0.2 + lightness), [x, 0, z]))
       if (Math.abs(x) < 70 && z > -250) colliders.push({ x, z, r: 0.6 })
+      for (let i = 0; i < touches; i++) {
+        // up the tree in five skirts: each is wide and dark at its rim
+        const up = Math.pow(rand(), 0.8)
+        const skirt = (up * 5) % 1
+        const angle = rand() * Math.PI * 2
+        // some touches stand out past the cone, for a ragged outline
+        const radius = width * (1 - up) * (1.05 - skirt * 0.3) * (1 + rand() * 0.14) + 0.1
+        const lit = lightOn(Math.cos(angle) * 0.9, 0.42, Math.sin(angle) * 0.9)
+        const t = 0.22 + lightness + lit * 0.62 - (1 - skirt) * 0.28 + (rand() - 0.5) * 0.4
+        const at: Vec3 = [x + Math.cos(angle) * radius, ground + up * height, z + Math.sin(angle) * radius]
+        dabs.face({ at, size: lerp(size[0], size[1], rand()), color: haze(tone('conifer', t), at) })
+      }
     }
     for (let z = 112; z > -240; z -= 5.2) {
       for (let x = -455; x < 455; x += 5.2) {
         const tx = x + range(-2.4, 2.4)
         const tz = z + range(-2.4, 2.4)
         const [path, open, shade] = zones.sample(tx, tz)
-        if (path > 0.02 || open > 0.12) continue
+        if (path > 0.02 || open > 0.12 || tz > -6) continue
         // dense on the walls, sparse singles on the valley floor, none among the big trees of the start
-        if (tz > -6) continue
-        const chance = shade > 0.5 ? 0.82 : 0.1
-        if (rand() < chance) plant(tx, tz, 1)
+        if (rand() >= (shade > 0.5 ? 0.82 : 0.1)) continue
+        // firs the player can reach are painted like leaves: many small dabs
+        if (Math.abs(tx) < 80) plant({ x: tx, z: tz, scale: 1, touches: 220, size: [0.28, 0.55], dabs: leaves })
+        else if (Math.abs(tx) < 130) plant({ x: tx, z: tz, scale: 1, touches: 30, size: [0.5, 0.95], dabs: solid })
+        else plant({ x: tx, z: tz, scale: 1, touches: 12, size: [1, 1.7], dabs: solid })
       }
     }
     for (let z = -240; z > -690; z -= 7.5) {
@@ -580,48 +730,36 @@ export function buildWorld() {
         const tz = z + range(-3.5, 3.5)
         const [path, open] = zones.sample(tx, tz)
         if (path > 0.02 || open > 0.12) continue
-        if (rand() < 0.9) plant(tx, tz, 1.45)
+        if (rand() < 0.9) plant({ x: tx, z: tz, scale: 1.45, touches: 8, size: [1.6, 2.6], dabs: solid })
       }
     }
-    const material = paintMaterial({ cell: 0.3, ref: 24, noise: 0.34, clump: [0.3, 3], light: 0.62, base: -0.04, haze: HAZE })
-    const conifers = new THREE.InstancedMesh(geometry, material, matrices.length)
+    const firs = new THREE.InstancedMesh(coniferGeometry(), underMaterial(), matrices.length)
     const color = new THREE.Color()
     matrices.forEach((matrix, i) => {
-      conifers.setMatrixAt(i, matrix)
-      conifers.setColorAt(i, color.setRGB(tones[i], 0, 0, THREE.LinearSRGBColorSpace))
+      firs.setMatrixAt(i, matrix)
+      firs.setColorAt(i, color.setRGB(...colors[i], THREE.LinearSRGBColorSpace))
     })
-    conifers.frustumCulled = false
-    scene.add(conifers)
+    firs.frustumCulled = false
+    scene.add(firs)
   }
 
   // ----- village -----
   const buildings = new Parts()
-  const gableRoof = (w: number, h: number, d: number) => {
-    // ridge along z
-    const x = w / 2
-    const z = d / 2
-    const v = [-x, 0, -z, x, 0, -z, 0, h, -z, -x, 0, z, x, 0, z, 0, h, z]
-    const faces = [0, 1, 2, 3, 5, 4, 0, 2, 5, 0, 5, 3, 1, 4, 5, 1, 5, 2]
-    const position = new Float32Array(faces.flatMap((i) => v.slice(i * 3, i * 3 + 3)))
-    const geometry = new THREE.BufferGeometry()
-    geometry.setAttribute('position', new THREE.BufferAttribute(position, 3))
-    geometry.computeVertexNormals()
-    return geometry
-  }
-  const house = (x: number, z: number, rot: number, w: number, d: number, h: number, wall: RampName = 'wall', roofBias = 0) => {
-    const ground = groundHeight(x, z)
-    const place = new THREE.Matrix4().makeRotationY(rot).setPosition(x, ground, z)
-    const at = (dx: number, dy: number, dz: number) => place.clone().multiply(new THREE.Matrix4().makeTranslation(dx, dy, dz))
-    buildings.add(new THREE.BoxGeometry(w, h + 3, d), wall, 0, at(0, h / 2 - 1.5, 0))
-    buildings.add(gableRoof(w + 1.2, w * 0.56, d + 1.2), 'roof', roofBias, at(0, h, 0))
-    buildings.add(new THREE.BoxGeometry(1.1, 2, 0.3), 'bark', 0.3, at(w * 0.15, 1, d / 2))
-    buildings.add(new THREE.BoxGeometry(0.9, 0.9, 0.3), 'bark', 0.3, at(-w * 0.25, h * 0.55, d / 2))
+  const house = ({ x, z, turn, w, d, h, roofBias = 0 }: { x: number; z: number; turn: number; w: number; d: number; h: number; roofBias?: number }) => {
+    const place = new THREE.Matrix4().makeRotationY(turn).setPosition(x, groundHeight(x, z), z)
+    const at = (offset: Vec3) => place.clone().multiply(new THREE.Matrix4().makeTranslation(...offset))
+    buildings.add(new THREE.BoxGeometry(w, h + 3, d), { ramp: 'wall', matrix: at([0, h / 2 - 1.5, 0]) })
+    buildings.add(gableRoof({ w: w + 1.2, h: w * 0.56, d: d + 1.2 }), { ramp: 'roof', bias: roofBias, matrix: at([0, h, 0]) })
+    // door and window
+    buildings.add(new THREE.BoxGeometry(1.1, 2, 0.3), { ramp: 'bark', bias: 0.3, matrix: at([w * 0.15, 1, d / 2]) })
+    buildings.add(new THREE.BoxGeometry(0.9, 0.9, 0.3), { ramp: 'bark', bias: 0.3, matrix: at([-w * 0.25, h * 0.55, d / 2]) })
     colliders.push({ x, z, r: Math.max(w, d) * 0.6 })
   }
-  const tower = (x: number, z: number, w: number, h: number) => {
+  const tower = ({ x, z, w, h }: { x: number; z: number; w: number; h: number }) => {
     const ground = groundHeight(x, z)
-    buildings.box('wall', x, ground + h / 2 - 1, z, w, h + 2, w, -0.08)
-    buildings.add(new THREE.ConeGeometry(w * 0.8, w * 0.9, 4).rotateY(Math.PI / 4), 'roof', -0.1, new THREE.Matrix4().makeTranslation(x, ground + h + w * 0.45, z))
+    buildings.box({ ramp: 'wall', center: [x, ground + h / 2 - 1, z], size: [w, h + 2, w], bias: -0.08 })
+    const roof = new THREE.ConeGeometry(w * 0.8, w * 0.9, 4).rotateY(Math.PI / 4)
+    buildings.add(roof, { ramp: 'roof', bias: -0.1, matrix: new THREE.Matrix4().makeTranslation(x, ground + h + w * 0.45, z) })
     colliders.push({ x, z, r: w * 0.75 })
   }
   // x, z, turn, width, depth, wall height
@@ -633,25 +771,22 @@ export function buildWorld() {
     [-62, -160, 0.1, 11, 9, 6.5], [-70, -152, -0.2, 10, 8, 6], [-58, -168, 0.4, 10, 8, 6], [58, -126, 0.2, 10, 8, 6],
     [-6, -123, -0.1, 9, 8, 6],
   ]
-  for (const [x, z, rot, w, d, h] of houses) house(x, z, rot, w * HOUSE_SCALE, d * HOUSE_SCALE, h * 0.6, 'wall', range(-0.2, -0.04))
+  for (const [x, z, turn, w, d, h] of houses) house({ x, z, turn, w: w * HOUSE_SCALE, d: d * HOUSE_SCALE, h: h * 0.6, roofBias: range(-0.2, -0.04) })
   // church on the knoll and two stone towers below it
-  house(-2, -226, 0, 9, 16, 7)
-  tower(-2, -215, 5, 16)
-  tower(14, -175, 4.5, 10)
-  tower(6, -165, 4, 7)
+  house({ x: -2, z: -226, turn: 0, w: 9, d: 16, h: 7 })
+  tower({ x: -2, z: -215, w: 5, h: 16 })
+  tower({ x: 14, z: -175, w: 4.5, h: 10 })
+  tower({ x: 6, z: -165, w: 4, h: 7 })
 
   // ----- castle on its crag -----
   {
-    const crag = new THREE.Group()
-    crag.position.set(CRAG.x, 0, CRAG.z)
-    scene.add(crag)
-
-    // rock: a polar height field, longer on the right as in the reference
-    const cragPoint = (angle: number, rr: number): [number, number, number] => {
+    const offset = new THREE.Vector3(CRAG.x, 0, CRAG.z)
+    // rock: a polar height field, longer on the right as in the reference. rr: 0 at the middle, 1 at the foot
+    const cragPoint = (angle: number, rr: number): Vec3 => {
       const reach = lerp(215, 340, Math.cos(angle) * 0.5 + 0.5) * (0.9 + 0.25 * noise(Math.cos(angle) * 2 + 9, Math.sin(angle) * 2 + 4))
       const x = Math.cos(angle) * reach * rr
       const z = Math.sin(angle) * reach * rr
-      // a steep cone with a small flat top, cut by radial gullies
+      // a steep cone with a flat top, cut by radial gullies
       const fall = 1 - Math.pow(clamp((rr - 0.3) / 0.7, 0, 1), 0.9) - 0.06 * smooth(0, 0.3, rr)
       const gully = ridged(Math.cos(angle) * 2.6 + 4, Math.sin(angle) * 2.6 + rr * 1.6) - 0.5
       const rough = ridged(x * 0.02 + 2, z * 0.02 + 5) - 0.5
@@ -669,68 +804,60 @@ export function buildWorld() {
       for (let j = 0; j < segments; j++) {
         const a = i * (segments + 1) + j
         const b = a + segments + 1
-        index.push(a, b, a + 1, a + 1, b, b + 1)
+        index.push(a, a + 1, b, a + 1, b + 1, b)
       }
     }
-    const rock = new THREE.BufferGeometry()
-    rock.setAttribute('position', new THREE.Float32BufferAttribute(position, 3))
-    rock.setIndex(index)
-    rock.computeVertexNormals()
-    const rockParts = new Parts()
-    rockParts.add(rock, 'crag')
-    const mist = { color: '#393a61', y: -30, feather: 30, max: 1 }
-    crag.add(rockParts.mesh(paintMaterial({ cell: 6, noise: 0.4, clump: [0.6, 30], light: 1.2, base: -0.3, flat: true, mist })))
+    const rockGeometry = new THREE.BufferGeometry()
+    rockGeometry.setAttribute('position', new THREE.Float32BufferAttribute(position, 3))
+    rockGeometry.setIndex(index)
+    const rock = new Parts()
+    rock.add(rockGeometry, { ramp: 'crag' })
+    add(rock, { style: CRAG_STYLE, scatter: CRAG_SCATTER, dabs: solid, offset })
 
-    // castle. Sizes read from the reference frame, 1 unit = 1.167 m
+    // castle. Sizes read from the reference frame: 1 unit is 1.167 m, heights are from the castle's foot
     const k = 1.167
+    const foot = CRAG.top - 26
+    // every part goes down at least this far, so it stands in the rock
+    const buried = -110
     const castle = new Parts()
-    const windows = new Splats()
-    const spireTower = (x: number, z: number, r: number, y0: number, y1: number, spire: number, bias = 0) => {
-      castle.column('castle', x * k, z * k, CRAG.top - 26 + Math.min(y0, -110) * k, CRAG.top - 26 + y1 * k, r * k, r * k * 0.94, 12, bias)
-      castle.column('castle', x * k, z * k, CRAG.top - 26 + y1 * k, CRAG.top - 26 + (y1 + r * 0.7) * k, r * k * 1.22, r * k * 1.22, 12, bias + 0.05)
-      castle.column('castle', x * k, z * k, CRAG.top - 26 + (y1 + r * 0.7) * k, CRAG.top - 26 + (y1 + r * 0.7 + spire) * k, r * k * 1.1, 0.4, 12, bias - 0.08)
+    const lightWindow = ([x, y, z]: Vec3) => solid.face({ at: [CRAG.x + x, y, CRAG.z + z], size: 2.6, color: hex(rand() < 0.6 ? '#a3512c' : '#c8743a'), pinned: true })
+    const spireTower = ({ x, z, r, y0, y1, spire, bias = 0 }: { x: number; z: number; r: number; y0: number; y1: number; spire: number; bias?: number }) => {
+      const gallery = y1 + r * 0.7
+      castle.column({ ramp: 'castle', x: x * k, z: z * k, y0: foot + Math.min(y0, buried) * k, y1: foot + y1 * k, r0: r * k, r1: r * k * 0.94, sides: 12, bias })
+      castle.column({ ramp: 'castle', x: x * k, z: z * k, y0: foot + y1 * k, y1: foot + gallery * k, r0: r * k * 1.22, r1: r * k * 1.22, sides: 12, bias: bias + 0.05 })
+      castle.column({ ramp: 'castle', x: x * k, z: z * k, y0: foot + gallery * k, y1: foot + (gallery + spire) * k, r0: r * k * 1.1, r1: 0.4, sides: 12, bias: bias - 0.08 })
       const lit = Math.max(1, Math.round((y1 - y0) / 70))
       for (let i = 0; i < lit; i++) {
         const angle = range(-0.9, 0.5)
-        const y = CRAG.top - 26 + lerp(y0 + 30, y1 - 6, rand()) * k
-        windows.add(CRAG.x + (x + Math.sin(angle) * (r + 1)) * k, y, CRAG.z + (z + Math.cos(angle) * (r + 1)) * k, 2.4, hex(rand() < 0.6 ? '#a3512c' : '#c8743a'))
+        lightWindow([(x + Math.sin(angle) * (r + 2)) * k, foot + lerp(y0 + 30, y1 - 6, rand()) * k, (z + Math.cos(angle) * (r + 2)) * k])
       }
     }
-    const hall = (x0: number, x1: number, z: number, depth: number, y0: number, y1: number, roof: number, bias = 0) => {
+    const hall = ({ x0, x1, z, depth, y0, y1, roof, bias = 0 }: { x0: number; x1: number; z: number; depth: number; y0: number; y1: number; roof: number; bias?: number }) => {
       const w = (x1 - x0) * k
       const cx = ((x0 + x1) / 2) * k
-      const bottom = Math.min(y0, -110)
-      castle.box('castle', cx, CRAG.top - 26 + ((bottom + y1) / 2) * k, z * k, w, (y1 - bottom) * k, depth * k, bias)
-      if (roof > 0) {
-        const geometry = gableRoof(depth * k * 1.06, roof * k, w * 1.04).rotateY(Math.PI / 2)
-        castle.add(geometry, 'castle', bias - 0.1, new THREE.Matrix4().makeTranslation(cx, CRAG.top - 26 + y1 * k, z * k))
-      }
+      const bottom = Math.min(y0, buried)
+      castle.box({ ramp: 'castle', center: [cx, foot + ((bottom + y1) / 2) * k, z * k], size: [w, (y1 - bottom) * k, depth * k], bias })
+      if (roof === 0) return
+      const geometry = gableRoof({ w: depth * k * 1.06, h: roof * k, d: w * 1.04 }).rotateY(Math.PI / 2)
+      castle.add(geometry, { ramp: 'castle', bias: bias - 0.1, matrix: new THREE.Matrix4().makeTranslation(cx, foot + y1 * k, z * k) })
     }
-    spireTower(0, 0, 20, -40, 222, 72)
-    spireTower(50, 10, 14, -30, 140, 58)
-    spireTower(-37, 15, 10, -20, 115, 40)
-    spireTower(-80, 26, 7.5, -40, 68, 28, 0.2)
-    spireTower(100, 22, 6, -50, 44, 30)
-    spireTower(-30, 46, 4, 30, 84, 16)
-    spireTower(45, 46, 4, 20, 80, 16)
-    spireTower(10, 52, 3.6, 60, 96, 14)
-    spireTower(-58, 56, 3.6, 10, 58, 14)
-    spireTower(76, 50, 3.6, 10, 60, 14)
-    spireTower(22, -6, 5, 100, 172, 20)
-    spireTower(-112, 34, 5, -50, -4, 18, 0.1)
-    hall(-30, 45, 25, 50, -40, 70, 26)
-    hall(-66, -20, 40, 36, -40, 42, 18, 0.04)
-    hall(45, 92, 30, 34, -50, 30, 16)
-    hall(-118, -66, 32, 14, -60, -24, 0, 0.08)
-    hall(-20, 20, -22, 30, 40, 110, 22, -0.04)
-    hall(88, 122, 30, 14, -70, -6, 0)
-    for (let i = 0; i < 5; i++) {
-      windows.add(CRAG.x + range(-60, 85) * k, CRAG.top - 26 + range(-10, 50) * k, CRAG.z + 62 * k, 2.4, hex(rand() < 0.6 ? '#a3512c' : '#c8743a'))
-    }
-    const castleMesh = castle.mesh(paintMaterial({ cell: 8, noise: 0.3, clump: [0.25, 40], light: 0.9, base: -0.02, flat: true }))
-    castleMesh.position.set(CRAG.x, 0, CRAG.z)
-    scene.add(castleMesh)
-    scene.add(windows.build())
+    // x, z, radius, lowest window, top of the shaft, spire height, tone bias
+    // prettier-ignore
+    const towers = [
+      [0, 0, 20, -40, 222, 72, 0], [50, 10, 14, -30, 140, 58, 0], [-37, 15, 10, -20, 115, 40, 0], [-80, 26, 7.5, -40, 68, 28, 0.2],
+      [100, 22, 6, -50, 44, 30, 0], [-30, 46, 4, 30, 84, 16, 0], [45, 46, 4, 20, 80, 16, 0], [10, 52, 3.6, 60, 96, 14, 0],
+      [-58, 56, 3.6, 10, 58, 14, 0], [76, 50, 3.6, 10, 60, 14, 0], [22, -6, 5, 100, 172, 20, 0], [-112, 34, 5, -50, -4, 18, 0.1],
+    ]
+    for (const [x, z, r, y0, y1, spire, bias] of towers) spireTower({ x, z, r, y0, y1, spire, bias })
+    // left, right, z, depth, foot, top, roof height (0: flat), tone bias
+    // prettier-ignore
+    const halls = [
+      [-30, 45, 25, 50, -40, 70, 26, 0], [-66, -20, 40, 36, -40, 42, 18, 0.04], [45, 92, 30, 34, -50, 30, 16, 0],
+      [-118, -66, 32, 14, -60, -24, 0, 0.08], [-20, 20, -22, 30, 40, 110, 22, -0.04], [88, 122, 30, 14, -70, -6, 0, 0],
+    ]
+    for (const [x0, x1, z, depth, y0, y1, roof, bias] of halls) hall({ x0, x1, z, depth, y0, y1, roof, bias })
+    for (let i = 0; i < 5; i++) lightWindow([range(-60, 85) * k, foot + range(-10, 50) * k, 64 * k])
+    add(castle, { style: CASTLE_STYLE, scatter: CASTLE_SCATTER, dabs: solid, offset })
 
     // dark firs on the right shoulder of the crag
     const firs = new Parts()
@@ -738,9 +865,9 @@ export function buildWorld() {
       const [x, y, z] = cragPoint(range(-1.2, 1.9), range(0.3, 0.98))
       if (x < -20) continue
       const height = range(16, 30)
-      firs.add(new THREE.ConeGeometry(height * 0.2, height, 5, 1, true), 'cragTree', range(-0.1, 0.15), new THREE.Matrix4().makeTranslation(x, y + height * 0.42, z))
+      firs.add(new THREE.ConeGeometry(height * 0.2, height, 5, 1, true), { ramp: 'cragTree', bias: range(-0.1, 0.15), matrix: new THREE.Matrix4().makeTranslation(x, y + height * 0.42, z) })
     }
-    crag.add(firs.mesh(paintMaterial({ cell: 5, noise: 0.4, light: 0.6, base: 0.05, mist })))
+    add(firs, { style: CRAG_FIR_STYLE, scatter: CRAG_FIR_SCATTER, dabs: solid, offset })
   }
 
   // ----- mountains -----
@@ -793,39 +920,83 @@ export function buildWorld() {
     const geometry = new THREE.BufferGeometry()
     geometry.setAttribute('position', new THREE.BufferAttribute(position, 3))
     geometry.setIndex(index)
-    geometry.computeVertexNormals()
-    const parts = new Parts()
-    parts.add(geometry, 'mountain')
-    scene.add(parts.mesh(paintMaterial({ cell: 14, noise: 0.4, clump: [0.75, 70], light: 1.4, base: -0.45, flat: true, mist: { color: '#393a61', y: 230, feather: 200, max: 0.85 } })))
+    const mountains = new Parts()
+    mountains.add(geometry, { ramp: 'mountain' })
+    add(mountains, { style: MOUNTAIN_STYLE, scatter: MOUNTAIN_SCATTER, dabs: solid })
   }
 
-  // ----- mist banks and low cloud -----
-  const bank = (z: number, y: number, w: number, h: number, options: Parameters<typeof mistMaterial>[0]) => {
-    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(w, h), mistMaterial(options))
-    mesh.position.set(0, y, z)
-    mesh.frustumCulled = false
-    scene.add(mesh)
+  // ----- mist banks: dabs below a billowy top line, with a light rim -----
+  interface Bank {
+    z: number
+    /** lowest dabs, and the mean top line, metres */
+    floor: number
+    top: number
+    /** how far the top line rises and falls */
+    swell: number
+    width: number
+    /** dab size */
+    size: number
+    /** dark, middle and light tones */
+    colors: [RGB, RGB, RGB]
+    seed: number
   }
-  bank(-600, -20, 2800, 280, { colors: ['#393a61', '#4b496a', '#5f5873'], scale: [48, 5], seed: 3.7, top: 0.72, billow: 0.2, band: 0.03 })
-  bank(-990, 110, 3600, 460, { colors: ['#292951', '#393a61', '#4b496a'], scale: [44, 5], seed: 11.3, top: 0.45, billow: 0.3, band: 0.03 })
+  const bank = ({ z, floor, top, swell, width, size, colors: [dark, mid, light], seed }: Bank) => {
+    const step = size * 0.75
+    for (let x = -width / 2; x < width / 2; x += step) {
+      const rise = fbm(x * 0.006 + seed, seed) * 0.6 + (1 - billow(x * 0.012 + seed, 3)) * 0.4 - 0.5
+      // the bank thins out toward its ends
+      const crest = top + rise * swell * 2 - smooth(0.3, 0.5, Math.abs(x) / width) * (top - floor)
+      for (let y = floor; y < crest; y += step) {
+        const patch = fbm(x * 0.01 + seed, y * 0.03)
+        const color = crest - y < size * 1.4 || patch > 0.55 ? light : patch > 0.44 ? mid : dark
+        solid.face({ at: [x + range(-0.5, 0.5) * step, y + range(-0.5, 0.5) * step, z + range(-20, 20)], size: size * range(0.9, 1.4), color })
+      }
+    }
+  }
+  bank({ z: -600, floor: -70, top: 40, swell: 40, width: 2800, size: 7, colors: [hex('#393a61'), hex('#4b496a'), hex('#5f5873')], seed: 3.7 })
+  bank({ z: -990, floor: -70, top: 95, swell: 60, width: 3600, size: 11, colors: [hex('#292951'), hex('#393a61'), hex('#4b496a')], seed: 11.3 })
+
+  // ----- cloud veil: the sky's clouds repeated on a plane before the mountains. Peaks show above it and through its gaps -----
   {
-    const veil = new THREE.Mesh(new THREE.PlaneGeometry(9000, 1700), cloudVeilMaterial())
-    veil.position.set(0, 650, -1560)
-    veil.frustumCulled = false
-    scene.add(veil)
+    const VEIL = { z: -1560, step: 17, size: 24 }
+    for (let x = -4200; x < 4200; x += VEIL.step) {
+      for (let y = -100; y < 1300; y += VEIL.step) {
+        const dx = x - EYE_START.x
+        const dz = VEIL.z - EYE_START.z
+        const az = Math.atan2(dx, -dz)
+        const el = Math.atan2(y - EYE_START.y, Math.hypot(dx, dz))
+        const { f, color } = skyAt({ az, el, chance: rand() })
+        if (f < 0.42 || el > 0.33 + (fbm(az * 9, 2) - 0.5) * 0.2) continue
+        solid.face({ at: [x + range(-0.5, 0.5) * VEIL.step, y + range(-0.5, 0.5) * VEIL.step, VEIL.z + range(-30, 30)], size: VEIL.size * range(0.9, 1.3), color })
+      }
+    }
   }
 
-  // ----- meshes built from the collected parts -----
-  scene.add(trunks.mesh(paintMaterial({ cell: [0.07, 0.9, 0.07], ref: 7, noise: 0.9, light: 0.5, base: -0.02 })))
-  scene.add(crowns.mesh(paintMaterial({ cell: 0.11, ref: 8, noise: 0.4, clump: [1.3, 0.8], light: 0.55, base: -0.1 })))
-  scene.add(shrubs.mesh(paintMaterial({ cell: 0.28, ref: 16, noise: 0.35, clump: [0.5, 1.4], light: 0.8, base: 0.02, haze: HAZE })))
-  scene.add(buildings.mesh(paintMaterial({ cell: 0.4, ref: 30, noise: 0.2, light: 0.92, base: -0.06, flat: true, haze: HAZE })))
-  scene.add(leaves.build({ sway: 0.035 }))
-  scene.add(foliage.build({ sway: 0.03 }))
+  // ----- paint the collected parts -----
+  add(trunks.near, { style: TRUNK_STYLE, scatter: TRUNK_SCATTER, dabs: solid })
+  add(trunks.far, { style: TRUNK_STYLE })
+  for (const tier of ['near', 'mid', 'far'] as const) add(crowns[tier], { style: CROWN_STYLE, scatter: CROWN_SCATTER[tier], dabs: leaves })
+  add(bushes.hero, { style: BUSH_STYLE, scatter: HERO_BUSH_SCATTER, dabs: leaves })
+  add(bushes.flowering, { style: BUSH_STYLE, scatter: { ...HERO_BUSH_SCATTER, accent: FLOWERS }, dabs: leaves })
+  add(bushes.wild, { style: BUSH_STYLE, scatter: WILD_BUSH_SCATTER, dabs: leaves })
+  add(leafy.near, { style: LEAFY_STYLE, scatter: LEAFY_SCATTER.near, dabs: leaves })
+  add(leafy.far, { style: LEAFY_STYLE, scatter: LEAFY_SCATTER.far, dabs: leaves })
+  add(buildings, { style: BUILDING_STYLE, scatter: BUILDING_SCATTER, dabs: solid })
+
+  scene.add(solid.build())
+  // leaves near the eye may grow to this many least sizes on screen, no more
+  scene.add(leaves.build({ sway: 0.03, maxSize: 40 }))
 
   const walkable = (x: number, z: number) => Math.abs(x) < valleyHalfWidth(-z) * 0.95 + 4 && z < 84 && z > -238
 
-  return { scene, colliders, walkable, start: { x: EYE_START.x, z: EYE_START.z, yaw: 0, pitch: -0.05 } }
+  return {
+    scene,
+    sky,
+    colliders,
+    walkable,
+    start: { x: EYE_START.x, z: EYE_START.z, yaw: 0, pitch: -0.05 },
+    counts: { solid: solid.count, leaves: leaves.count },
+  }
 }
 
 export type World = ReturnType<typeof buildWorld>

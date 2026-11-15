@@ -16,14 +16,21 @@ pnpm dev
 
 ## How it looks painted
 
-The canvas renders about **270 pixels** on its short side and CSS scales it up with hard pixels.
-Three things give the brush-stroke look:
+The whole world is made of **dabs**: flat-coloured rectangles pinned to points in 3D. There is no filter on top
+and no pixel grid on the screen. The idea is from https://patch.gg/blendi/oil-paint, with a much simpler brush.
 
-- **Flat ramps.** Every surface picks one of 6 flat tones from a small colour ramp. The ramps are
-  measured from the reference video (`RAMP_DEFS` in `src/paint.ts`).
-- **Voxel cells.** The tone changes per world-space cell, not per pixel. Cells double in size with
-  distance, so a dab is always a few pixels wide far away and grows into a big block at your feet.
-- **Splats.** Leaves and sparks are flat square quads that face the camera, one colour each.
+```
+under mesh ── coarse geometry in flat colours, so nothing shows between the dabs
+dabs ──────── about 2 million instanced quads, one flat colour each
+               face: a square that turns to the eye (leaves, rock, cloud, sky)
+               lie:  a stroke that lies on its surface (ground, walls, bark)
+```
+
+- **Pinned to the world.** A dab never moves, so the paint stays on things when you walk or turn.
+- **Colours are mixed once**, when the world is built: a tone from a small ramp, picked by light and chance.
+  The ramps are measured from the reference video (`RAMPS` in `src/paint.ts`).
+- **Far away, fewer and larger dabs.** Each dab has a fixed rank. With distance only the low ranks stay and
+  grow to cover their neighbours, so strokes never swap.
 
 The hands are **pixel sprites** cut from the reference frame and drawn over the world, like Doom weapons.
 

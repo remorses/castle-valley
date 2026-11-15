@@ -7,30 +7,41 @@ Run `pnpm typecheck` after every change. `pnpm dev` starts Vite.
 ## architecture
 
 ```
-src/main.ts ───────▶ renderer (270 px short side, CSS upscale), input, player step, game loop, debug hook
+src/main.ts ───────▶ renderer, input, player step, game loop, debug hook
    │
-   ├──▶ src/world.ts ───── buildWorld(): one static scene, built once at load
+   ├──▶ src/world.ts ───── buildWorld(): one static scene, built once at load (about 2 million dabs)
    │       groundHeight(x, z) ◀── axis slope table + valley funnel + far hills   (also moves the player)
-   │       buildZones() ─────────▶ 1024² zone map: r path, g lit ground, b forest shade
-   │       forest, bushes, leafy trees, conifers (instanced), village, crag + castle, mountains, mist banks
+   │       buildZones() ─────────▶ zone map read while painting: r path, g lit ground, b forest shade
+   │       buildGround() ────────▶ under mesh + strokes, finer near the paths (GROUND_BANDS)
+   │       forest, bushes, leafy trees, firs, village, crag + castle, mountains: Parts ──▶ paint()
+   │       sky, mist banks, cloud veil: dabs placed directly
    │
-   ├──▶ src/viewmodel.ts ─ hands as pixel sprites (torch, sword), flame wobble, sparks: own pixel-space
-   │                       scene with an orthographic camera, drawn after the world
+   ├──▶ src/viewmodel.ts ─ hands as pixel sprites (torch, sword), flame wobble, sparks: own scene with an
+   │                       orthographic camera in reference pixels, drawn after the world
    │
-   └──▶ src/paint.ts ───── the look: RAMP_DEFS palette, paintMaterial, terrainMaterial, Splats,
-                           skyMaterial / cloudVeilMaterial, mistMaterial, Parts (geometry merger)
+   └──▶ src/paint.ts ───── the look: RAMPS palette, Dabs (instanced quads + the one dab shader),
+                           Parts (geometry with a ramp and a bias), paint() (under mesh + scattered dabs),
+                           Style and Scatter (how a kind of thing is painted), noise helpers
 ```
 
-- **Colours** never go through `THREE.Color`. `hex()` keeps raw sRGB so the output matches the palette exactly.
-- **paintMaterial** is the one mesh shader: tone = base + light + voxel cell noise + clump noise, then one ramp lookup.
-- **Parts** merges tagged geometry (`aRamp`, `aTone`) into one mesh per material. Add new props through it.
+The renderer follows https://patch.gg/blendi/oil-paint (source: `~/Documents/GitHub/oil-paint`), with a simpler brush.
+
+- **Everything visible is a dab or an under mesh.** No lights, no textures, no post-processing. Never add a
+  screen-space effect: the look must stay pinned to the world.
+- **Dabs** are flat-coloured instanced quads. `face` dabs turn to the eye. `lie` dabs lie on a surface and are
+  stood up when seen edge on. Colours are baked when the world is built.
+- **Far dabs:** each dab has a fixed rank. Past the distance where it would be smaller than `uMinPx`, only the
+  low ranks stay and grow. The vertex shader uses true distance, so turning the head changes nothing.
+- **Under meshes** take the light from face normals. Custom geometry must be wound outward.
+- **Colours** never go through `THREE.Color`. `hex()` keeps raw sRGB and the renderer converts nothing.
+- **Sizes on screen** are set against the reference frame, 270 pixels on the short side (`MIN_DAB` in `main.ts`).
 - **Layout** is in world units (metres). The player starts at `z = 14` and looks toward `-Z`. Tables of paths,
-  meadows, houses and peaks are at the top of each section in `world.ts`.
-- The world is static. Per-frame work is the player step, the sparks and two render calls.
+  meadows, houses, towers and peaks sit next to the code that uses them in `world.ts`.
+- Per-frame work is the player step, the sparks and two render calls. `window.game.counts` shows the dab counts.
 
 ## hand sprites
 
-The hands are cut from the reference frame, not modelled. One sprite pixel is one render pixel on a tall screen.
+The hands are cut from the reference frame, not modelled. One sprite pixel is one reference pixel.
 
 ```
 reference crop + magenta margin ──▶ image model: keep the hand, flat #FF00FF elsewhere, extend the arm
@@ -52,7 +63,7 @@ tables in `src/viewmodel.ts`. Update them when a sprite changes size.
 `window.game` is a debug hook (`src/main.ts`):
 
 ```js
-game.snap({ x: 0, z: 14, yaw: 0, pitch: -0.05 }) // place the player, returns a PNG data URL of the low-res frame
+game.snap({ x: 0, z: 14, yaw: 0, pitch: -0.05 }) // place the player, returns a PNG data URL of the frame
 game.manual = true; game.stick.y = -1; game.tick(1 / 24) // step frame by frame while walking forward
 ```
 

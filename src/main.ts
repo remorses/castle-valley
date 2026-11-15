@@ -1,11 +1,15 @@
-// Bootstrap: low-resolution renderer, first-person controls, game loop.
-// The canvas renders about 270 pixels on its short side and CSS scales it up with hard pixels.
+// Bootstrap: renderer, first-person controls, game loop.
+// Sizes on screen are set against the reference frame, which is 270 pixels on its short side.
 import * as THREE from 'three'
 import { shared } from './paint.ts'
 import { buildViewModel } from './viewmodel.ts'
-import { buildWorld, groundHeight } from './world.ts'
+import { BACKDROP, buildWorld, groundHeight } from './world.ts'
 
-const SHORT_SIDE_PIXELS = 270
+const REFERENCE_SHORT_SIDE = 270
+// least size of a dab on screen, in reference pixels
+const MIN_DAB = 1.15
+// more pixels than this on the short side cost speed and show nothing more
+const MAX_SHORT_SIDE_PIXELS = 820
 const EYE_HEIGHT = 1.7
 const WALK_SPEED = 3.4
 const RUN_SPEED = 7
@@ -16,8 +20,10 @@ const STICK_RADIUS = 56
 const MAX_PITCH = 1.2
 const MAX_FRAME_SECONDS = 0.05
 
-const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' })
-renderer.setPixelRatio(1)
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' })
+// colours are mixed as they should look on screen: nothing converts them
+renderer.outputColorSpace = THREE.LinearSRGBColorSpace
+renderer.setClearColor(new THREE.Color().setRGB(...BACKDROP, THREE.LinearSRGBColorSpace))
 renderer.autoClear = false
 const canvas = renderer.domElement
 document.body.appendChild(canvas)
@@ -30,16 +36,17 @@ camera.rotation.order = 'YXZ'
 const player = { x: world.start.x, z: world.start.z, yaw: world.start.yaw, pitch: world.start.pitch, vx: 0, vz: 0, bob: 0, stride: 0 }
 
 function resize() {
-  const k = SHORT_SIDE_PIXELS / Math.min(innerWidth, innerHeight)
-  const width = Math.max(1, Math.round(innerWidth * k))
-  const height = Math.max(1, Math.round(innerHeight * k))
-  renderer.setSize(width, height, false)
-  camera.aspect = width / height
+  const short = Math.min(innerWidth, innerHeight)
+  const ratio = Math.min(devicePixelRatio, MAX_SHORT_SIDE_PIXELS / short)
+  renderer.setPixelRatio(ratio)
+  renderer.setSize(innerWidth, innerHeight)
+  camera.aspect = innerWidth / innerHeight
   // the scene is composed for a tall screen: keep a similar horizontal view on wide ones
   camera.fov = camera.aspect < 1 ? 70 : 56
   camera.updateProjectionMatrix()
-  shared.uPixel.value = (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2))) / height
-  hands.resize(width, height)
+  shared.uPixel.value = (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2))) / (innerHeight * ratio)
+  shared.uMinPx.value = (MIN_DAB * short * ratio) / REFERENCE_SHORT_SIDE
+  hands.resize((innerWidth * REFERENCE_SHORT_SIDE) / short, (innerHeight * REFERENCE_SHORT_SIDE) / short)
 }
 addEventListener('resize', resize)
 resize()
@@ -51,7 +58,7 @@ const stick = { x: 0, y: 0 }
 const hint = document.querySelector<HTMLElement>('#hint')!
 let turnSpeed = 0
 
-function look(dx: number, dy: number, speed: number) {
+function look({ dx, dy, speed }: { dx: number; dy: number; speed: number }) {
   player.yaw -= dx * speed
   player.pitch = THREE.MathUtils.clamp(player.pitch - dy * speed, -MAX_PITCH, MAX_PITCH)
   turnSpeed -= dx * speed * 30
@@ -70,7 +77,7 @@ canvas.addEventListener('mousedown', () => {
   void Promise.resolve(canvas.requestPointerLock?.()).catch(() => {})
 })
 addEventListener('mousemove', (event) => {
-  if (document.pointerLockElement === canvas) look(event.movementX, event.movementY, LOOK_SPEED)
+  if (document.pointerLockElement === canvas) look({ dx: event.movementX, dy: event.movementY, speed: LOOK_SPEED })
 })
 
 // touch: left half is a movement stick, right half drags the view, a tap swings the sword
@@ -94,7 +101,7 @@ canvas.addEventListener('pointermove', (event) => {
     stick.x = THREE.MathUtils.clamp((event.clientX - touch.startX) / STICK_RADIUS, -1, 1)
     stick.y = THREE.MathUtils.clamp((event.clientY - touch.startY) / STICK_RADIUS, -1, 1)
   } else {
-    look(dx, dy, TOUCH_LOOK_SPEED)
+    look({ dx, dy, speed: TOUCH_LOOK_SPEED })
   }
 })
 const endTouch = (event: PointerEvent) => {
@@ -157,6 +164,8 @@ function render(time: number) {
   const lift = Math.abs(Math.cos(player.bob)) * 0.06 * player.stride
   camera.position.set(player.x, groundHeight(player.x, player.z) + EYE_HEIGHT - lift, player.z)
   camera.rotation.set(player.pitch, player.yaw, Math.sin(player.bob) * 0.006 * player.stride)
+  // the sky is painted on a far sphere that travels with the eye
+  world.sky.position.copy(camera.position)
   renderer.clear()
   renderer.render(world.scene, camera)
   renderer.clearDepth()
@@ -173,6 +182,8 @@ function advance(dt: number, time: number) {
 const debug = {
   player,
   stick,
+  counts: world.counts,
+  scene: world.scene,
   manual: false,
   time: 3,
   /** place the player, draw one frame, return it as a PNG data URL */

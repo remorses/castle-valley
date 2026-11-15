@@ -1,36 +1,96 @@
-// Painted-voxel rendering: every surface picks a flat tone from a small colour ramp.
-// Tones change per world-space voxel cell, so dabs grow as they get near the camera.
-// Foliage and fire are square splats: flat-coloured quads that always face the camera.
+// Dab painting. The whole world is made of brush dabs pinned to points in 3D, after https://patch.gg/blendi/oil-paint,
+// with a much simpler brush: a dab is one flat-coloured rectangle. No brush texture, no lighting in the shader.
+//
+//   under mesh ── coarse geometry in flat colours, so nothing shows between the dabs
+//   dabs ──────── instanced quads. `face` dabs are squares that turn to the eye (leaves, rock, cloud).
+//                 `lie` dabs are strokes that lie on their surface (ground, walls, bark).
+//
+// Colours are mixed once, when the world is built: a tone from a small ramp, picked by light and chance.
+// Because every dab is pinned to the world, the paint stays on things as the eye moves. Far away only a share of
+// the dabs is drawn, each grown to stand for its neighbours; which ones stay never changes.
 import * as THREE from 'three'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 
+// ---------- math and noise ----------
+
+export const clamp = (x: number, a: number, b: number) => Math.min(b, Math.max(a, x))
+export const lerp = (a: number, b: number, t: number) => a + (b - a) * t
+export function smooth(a: number, b: number, x: number) {
+  const t = clamp((x - a) / (b - a), 0, 1)
+  return t * t * (3 - 2 * t)
+}
+
+export function mulberry(seed: number) {
+  let a = seed >>> 0
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0
+    let t = a
+    t = Math.imul(t ^ (t >>> 15), t | 1)
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+function hash2(x: number, y: number) {
+  let h = Math.imul(x | 0, 374761393) + Math.imul(y | 0, 668265263)
+  h = Math.imul(h ^ (h >>> 13), 1274126177)
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296
+}
+
+export function noise(x: number, y: number) {
+  const ix = Math.floor(x)
+  const iy = Math.floor(y)
+  let fx = x - ix
+  let fy = y - iy
+  fx = fx * fx * (3 - 2 * fx)
+  fy = fy * fy * (3 - 2 * fy)
+  return lerp(lerp(hash2(ix, iy), hash2(ix + 1, iy), fx), lerp(hash2(ix, iy + 1), hash2(ix + 1, iy + 1), fx), fy)
+}
+
+export function fbm(x: number, y: number, octaves = 4) {
+  let amp = 0.5
+  let sum = 0
+  for (let i = 0; i < octaves; i++) {
+    sum += amp * noise(x, y)
+    x = x * 2.03 + 17.1
+    y = y * 2.03 + 9.7
+    amp *= 0.5
+  }
+  return sum
+}
+
+/** sharp ridges: mountains */
+export function ridged(x: number, y: number) {
+  let amp = 0.5
+  let sum = 0
+  for (let i = 0; i < 4; i++) {
+    sum += amp * (1 - Math.abs(noise(x, y) * 2 - 1))
+    x = x * 2.1 + 5.3
+    y = y * 2.1 + 3.1
+    amp *= 0.5
+  }
+  return sum
+}
+
+/** rounded lumps with creases between them: cumulus */
+export function billow(x: number, y: number) {
+  let amp = 0.5
+  let sum = 0
+  for (let i = 0; i < 4; i++) {
+    sum += amp * Math.abs(noise(x, y) * 2 - 1)
+    x = x * 2.07 + 11.3
+    y = y * 2.07 + 11.3
+    amp *= 0.5
+  }
+  return sum
+}
+
+// ---------- palette ----------
+
 export const TONES = 6
 
-// Colours measured from the reference video, dark to light.
-const RAMP_DEFS = {
-  grass: ['#2c411b', '#3a4f26', '#4a592c', '#5c662f', '#6e6e33', '#807532'],
-  forestFloor: ['#020805', '#09100d', '#111917', '#1b2a1c', '#29371d', '#394d24'],
-  path: ['#7c6e3e', '#957945', '#ab925c', '#baa46b', '#cfb87a', '#e6d5a4'],
-  bark: ['#000100', '#040806', '#0a0f0c', '#111613', '#1a211c', '#252e28'],
-  canopy: ['#000101', '#030806', '#09100d', '#111917', '#1b2424', '#2a3a34'],
-  conifer: ['#0a100e', '#131d18', '#1c2b26', '#24382f', '#2e4541', '#3a5548'],
-  bushy: ['#161e1b', '#232e21', '#333d29', '#454f31', '#56643a', '#69794b'],
-  roof: ['#27181b', '#3d211f', '#502f27', '#6c3d34', '#8a4a33', '#a3512c'],
-  wall: ['#343d43', '#5c5b4b', '#86715a', '#a08a66', '#ae9871', '#c8b48a'],
-  castle: ['#0b0b1c', '#0f0f24', '#13132b', '#181833', '#1e1e3d', '#272749'],
-  crag: ['#0c0c1e', '#111127', '#161630', '#1d1d3b', '#27274f', '#373863'],
-  cragTree: ['#07070f', '#0a0b17', '#0d0f1e', '#111425', '#151a2b', '#1a2132'],
-  mountain: ['#1b1a38', '#25244a', '#2f2e56', '#3b3a5f', '#4a4666', '#5f5670'],
-} as const
-
-export type RampName = keyof typeof RAMP_DEFS
-const RAMP_NAMES = Object.keys(RAMP_DEFS) as RampName[]
-const RAMP_COUNT = RAMP_NAMES.length
-
-/** Ramp name to row index in the palette texture. */
-export const R = Object.fromEntries(RAMP_NAMES.map((name, i) => [name, i])) as Record<RampName, number>
-
-export type RGB = [number, number, number]
+export type Vec3 = [number, number, number]
+export type RGB = Vec3
 
 /** Raw sRGB values in 0..1. Not THREE.Color: that converts to linear and shifts the palette. */
 export function hex(color: string): RGB {
@@ -38,518 +98,389 @@ export function hex(color: string): RGB {
   return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255]
 }
 
-export function tone(name: RampName, t: number): RGB {
-  const i = Math.min(TONES - 1, Math.max(0, Math.floor(t * TONES)))
-  return hex(RAMP_DEFS[name][i])
+// Colours measured from the reference video, dark to light.
+const RAMPS = {
+  grass: ['#2c411b', '#3a4f26', '#4a592c', '#5c662f', '#6e6e33', '#807532'].map(hex),
+  forestFloor: ['#020805', '#09100d', '#111917', '#1b2a1c', '#29371d', '#394d24'].map(hex),
+  path: ['#7c6e3e', '#957945', '#ab925c', '#baa46b', '#cfb87a', '#e6d5a4'].map(hex),
+  bark: ['#000100', '#040806', '#0a0f0c', '#111613', '#1a211c', '#252e28'].map(hex),
+  canopy: ['#000101', '#030806', '#09100d', '#111917', '#1b2424', '#2a3a34'].map(hex),
+  conifer: ['#0a100e', '#131d18', '#1c2b26', '#24382f', '#2e4541', '#3a5548'].map(hex),
+  bushy: ['#161e1b', '#232e21', '#333d29', '#454f31', '#56643a', '#69794b'].map(hex),
+  roof: ['#27181b', '#3d211f', '#502f27', '#6c3d34', '#8a4a33', '#a3512c'].map(hex),
+  wall: ['#343d43', '#5c5b4b', '#86715a', '#a08a66', '#ae9871', '#c8b48a'].map(hex),
+  castle: ['#0b0b1c', '#0f0f24', '#13132b', '#181833', '#1e1e3d', '#272749'].map(hex),
+  crag: ['#0c0c1e', '#111127', '#161630', '#1d1d3b', '#27274f', '#373863'].map(hex),
+  cragTree: ['#07070f', '#0a0b17', '#0d0f1e', '#111425', '#151a2b', '#1a2132'].map(hex),
+  mountain: ['#1b1a38', '#25244a', '#2f2e56', '#3b3a5f', '#4a4666', '#5f5670'].map(hex),
 }
 
-function paletteTexture() {
-  const data = new Uint8Array(TONES * RAMP_COUNT * 4)
-  RAMP_NAMES.forEach((name, row) => {
-    RAMP_DEFS[name].forEach((color, col) => {
-      const [r, g, b] = hex(color)
-      data.set([r * 255, g * 255, b * 255, 255], (row * TONES + col) * 4)
-    })
-  })
-  const texture = new THREE.DataTexture(data, TONES, RAMP_COUNT, THREE.RGBAFormat)
-  texture.magFilter = texture.minFilter = THREE.NearestFilter
-  texture.needsUpdate = true
-  return texture
+export type RampName = keyof typeof RAMPS
+
+/** the tone of a ramp for t in 0..1, dark to light */
+export function tone(name: RampName, t: number): RGB {
+  return RAMPS[name][Math.min(TONES - 1, Math.max(0, Math.floor(t * TONES)))]
+}
+
+export function mixColor(a: RGB, b: RGB, t: number): RGB {
+  return [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)]
 }
 
 export const LIGHT_DIR = new THREE.Vector3(-0.55, 0.75, 0.35).normalize()
 
-/** Uniforms shared by every material in the world scene. */
+/** how lit a surface with this normal is, 0..1 */
+export const lightOn = (nx: number, ny: number, nz: number) => (nx * LIGHT_DIR.x + ny * LIGHT_DIR.y + nz * LIGHT_DIR.z) * 0.5 + 0.5
+
+/** Uniforms shared by every dab mesh. Set on resize. */
 export const shared = {
-  uPalette: { value: paletteTexture() },
   uTime: { value: 0 },
-  uLightDir: { value: LIGHT_DIR },
-  // world size of one render pixel at depth 1, set on resize
-  uPixel: { value: 0.004 },
+  // world size of one screen pixel at distance 1
+  uPixel: { value: 0.001 },
+  // least size of a dab on screen, in pixels
+  uMinPx: { value: 4 },
 }
 
-const COMMON = /* glsl */ `
-uniform sampler2D uPalette;
-uniform vec3 uLightDir;
-uniform float uTime;
+// ---------- dabs ----------
 
-float hash13(vec3 p) {
-  p = fract(p * 0.1031);
-  p += dot(p, p.zyx + 31.32);
-  return fract((p.x + p.y) * p.z);
-}
-float hash12(vec2 p) {
-  vec3 p3 = fract(vec3(p.xyx) * 0.1031);
-  p3 += dot(p3, p3.yzx + 33.33);
-  return fract((p3.x + p3.y) * p3.z);
-}
-float vnoise(vec2 p) {
-  vec2 i = floor(p), f = fract(p);
-  f = f * f * (3.0 - 2.0 * f);
-  return mix(mix(hash12(i), hash12(i + vec2(1.0, 0.0)), f.x), mix(hash12(i + vec2(0.0, 1.0)), hash12(i + vec2(1.0, 1.0)), f.x), f.y);
-}
-float vnoise3(vec3 p) {
-  vec3 i = floor(p), f = fract(p);
-  f = f * f * (3.0 - 2.0 * f);
-  vec2 e = vec2(0.0, 1.0);
-  return mix(
-    mix(mix(hash13(i), hash13(i + e.yxx), f.x), mix(hash13(i + e.xyx), hash13(i + e.yyx), f.x), f.y),
-    mix(mix(hash13(i + e.xxy), hash13(i + e.yxy), f.x), mix(hash13(i + e.xyy), hash13(i + e.yyy), f.x), f.y),
-    f.z);
-}
-float fbm(vec2 p) {
-  float a = 0.5, s = 0.0;
-  for (int i = 0; i < 5; i++) { s += a * vnoise(p); p = p * 2.03 + 17.1; a *= 0.5; }
-  return s;
-}
-// puffy noise: rounded lumps with sharp creases between them
-float billow(vec2 p) {
-  float a = 0.5, s = 0.0;
-  for (int i = 0; i < 4; i++) { s += a * abs(vnoise(p) * 2.0 - 1.0); p = p * 2.07 + 11.3; a *= 0.5; }
-  return s;
-}
-float bayer4(vec2 p) {
-  ivec2 i = ivec2(mod(p, 4.0));
-  float m[16] = float[16](0., 8., 2., 10., 12., 4., 14., 6., 3., 11., 1., 9., 15., 7., 13., 5.);
-  return (m[i.x + i.y * 4] + 0.5) / 16.0;
-}
-// Voxel cell hash. Past the ref distance cells double in size, blended, so a cell never gets smaller than a few pixels.
-float voxel(vec3 p, vec3 size, float dist, float ref) {
-  float l = max(log2(max(dist, 0.001) / ref), 0.0);
-  float l0 = floor(l);
-  float s = exp2(l0);
-  float a = hash13(floor(p / (size * s)) + l0 * 19.0);
-  float b = hash13(floor(p / (size * s * 2.0)) + l0 * 19.0 + 19.0);
-  return mix(a, b, l - l0);
-}
-vec3 ramp(float index, float t) {
-  float tone = clamp(floor(t * ${TONES}.0), 0.0, ${TONES - 1}.0);
-  return texture2D(uPalette, vec2((tone + 0.5) / ${TONES}.0, (index + 0.5) / ${RAMP_COUNT}.0)).rgb;
-}
-`
-
-const MESH_VERTEX = /* glsl */ `
-attribute float aRamp;
-attribute float aTone;
-varying vec3 vWorld;
-varying vec3 vCell;
-varying vec3 vNormal;
-varying float vRamp;
-varying float vTone;
-void main() {
-  vec4 lp = vec4(position, 1.0);
-  vec3 n = normal;
-  #ifdef USE_INSTANCING
-    lp = instanceMatrix * lp;
-    n = mat3(instanceMatrix) * n;
-  #endif
-  vec4 wp = modelMatrix * lp;
-  vWorld = wp.xyz;
-  vCell = wp.xyz;
-  vNormal = normalize(mat3(modelMatrix) * n);
-  vRamp = aRamp;
-  vTone = aTone;
-  #ifdef USE_INSTANCING_COLOR
-    vTone += instanceColor.r - 0.5;
-  #endif
-  gl_Position = projectionMatrix * viewMatrix * wp;
-}
-`
-
-const MESH_FRAGMENT = /* glsl */ `
-${COMMON}
-varying vec3 vWorld;
-varying vec3 vCell;
-varying vec3 vNormal;
-varying float vRamp;
-varying float vTone;
-uniform vec3 uCell;
-uniform float uLodRef;
-uniform float uNoise;
-uniform float uLight;
-uniform float uBase;
-uniform float uFlat;
-uniform vec2 uClump;
-uniform vec3 uHazeColor;
-uniform vec3 uHaze;
-uniform vec3 uMistColor;
-uniform vec3 uMist;
-void main() {
-  vec3 n = uFlat > 0.5 ? normalize(cross(dFdx(vWorld), dFdy(vWorld))) : normalize(vNormal);
-  float dist = distance(vWorld, cameraPosition);
-  float nz = voxel(vCell, uCell, uLodRef > 0.0 ? dist : 0.0, max(uLodRef, 0.001));
-  float light = dot(n, uLightDir) * 0.5 + 0.5;
-  // clumps: soft patches of light and dark a few cells wide, like leaf clusters or rock faces
-  float clump = uClump.x > 0.0 ? vnoise3(vCell / uClump.y) * 0.65 + vnoise3(vCell / uClump.y * 2.7 + 7.3) * 0.35 : 0.5;
-  float t = uBase + vTone + light * uLight + (nz - 0.5) * uNoise + (clump - 0.5) * uClump.x;
-  vec3 col = ramp(vRamp, t);
-  float haze = clamp((dist - uHaze.x) / (uHaze.y - uHaze.x), 0.0, 1.0) * uHaze.z;
-  col = mix(col, uHazeColor, floor(haze * 5.0 + nz) / 5.0);
-  float edge = vWorld.y + (fbm(vWorld.xz * 0.012) - 0.5) * uMist.y * 2.0;
-  float mist = smoothstep(uMist.x + uMist.y, uMist.x - uMist.y, edge) * uMist.z;
-  col = mix(col, uMistColor, floor(mist * 4.0 + nz) / 4.0);
-  gl_FragColor = vec4(col, 1.0);
-}
-`
-
-export interface PaintOptions {
-  /** voxel cell size in world units at distances up to `ref` */
-  cell: number | [number, number, number]
-  /** distance where cells start to grow. 0 keeps the size fixed */
-  ref?: number
-  noise?: number
-  /** soft tone patches: strength and size in world units */
-  clump?: [number, number]
-  light?: number
-  base?: number
-  /** facet normals from screen derivatives, for rocks and buildings */
-  flat?: boolean
-  haze?: { color: string; start: number; end: number; max: number }
-  mist?: { color: string; y: number; feather: number; max: number }
-}
-
-export function paintMaterial(options: PaintOptions) {
-  const cell = typeof options.cell === 'number' ? [options.cell, options.cell, options.cell] : options.cell
-  const haze = options.haze ?? { color: '#000000', start: 1e6, end: 2e6, max: 0 }
-  const mist = options.mist ?? { color: '#000000', y: -1e6, feather: 1, max: 0 }
-  return new THREE.ShaderMaterial({
-    uniforms: {
-      ...shared,
-      uCell: { value: new THREE.Vector3(...cell) },
-      uLodRef: { value: options.ref ?? 0 },
-      uNoise: { value: options.noise ?? 0.3 },
-      uLight: { value: options.light ?? 0.6 },
-      uBase: { value: options.base ?? 0.2 },
-      uFlat: { value: options.flat ? 1 : 0 },
-      uClump: { value: new THREE.Vector2(...(options.clump ?? [0, 1])) },
-      uHazeColor: { value: new THREE.Vector3(...hex(haze.color)) },
-      uHaze: { value: new THREE.Vector3(haze.start, haze.end, haze.max) },
-      uMistColor: { value: new THREE.Vector3(...hex(mist.color)) },
-      uMist: { value: new THREE.Vector3(mist.y, mist.feather, mist.max) },
-    },
-    vertexShader: MESH_VERTEX,
-    fragmentShader: MESH_FRAGMENT,
-    side: options.flat ? THREE.DoubleSide : THREE.FrontSide,
-  })
-}
-
-// Ground: long thin cells across the path read as brush strokes and cobble rows.
-const TERRAIN_FRAGMENT = /* glsl */ `
-${COMMON}
-varying vec3 vWorld;
-varying vec3 vNormal;
-uniform sampler2D uZones;
-uniform vec4 uZoneRect;
-uniform vec3 uHazeColor;
-uniform vec3 uHaze;
-
-float strokeCell(vec2 p, vec2 size, float level) {
-  vec2 q = p / (size * exp2(level));
-  q.x += hash12(vec2(floor(q.y), level)) * 7.0;
-  return hash13(vec3(floor(q), level));
-}
-float strokes(vec2 p, vec2 size, float dist, float ref) {
-  float l = max(log2(max(dist, 0.001) / ref), 0.0);
-  float l0 = floor(l);
-  return mix(strokeCell(p, size, l0), strokeCell(p, size, l0 + 1.0), l - l0);
-}
-void main() {
-  vec3 n = normalize(vNormal);
-  float dist = distance(vWorld, cameraPosition);
-  vec2 zuv = (vWorld.xz - uZoneRect.xy) / uZoneRect.zw;
-  // r: path, g: open lit ground, b: forest shade
-  vec4 zone = texture2D(uZones, zuv);
-  if (zuv.x < 0.0 || zuv.y < 0.0 || zuv.x > 1.0 || zuv.y > 1.0) zone = vec4(0.0, 0.0, 1.0, 1.0);
-
-  float fine = strokes(vWorld.xz, vec2(0.34, 0.15), dist, 5.0);
-  float coarse = strokes(vWorld.xz + 31.7, vec2(1.3, 0.45), dist, 5.0);
-  float broad = fbm(vWorld.xz * 0.045);
-  float near = 1.0 - smoothstep(3.0, 30.0, dist);
-  float light = dot(n, uLightDir) * 0.5 + 0.5;
-  float shade = zone.b * (1.0 - smoothstep(0.1, 0.32, zone.g));
-
-  vec3 col;
-  if (zone.r + (coarse - 0.5) * 0.4 * near > 0.5) {
-    float cobble = strokes(vWorld.xz + 5.3, vec2(0.2, 0.13), dist, 4.0);
-    float t = 0.44 + (cobble - 0.5) * mix(0.35, 0.85, near) + (coarse - 0.5) * 0.25 - shade * 0.12;
-    col = ramp(${R.path}.0, t);
-    // dark joints and mossy stones between the cobbles
-    if (cobble < 0.04 * near) col = vec3(0.09, 0.067, 0.059);
-    else if (cobble > 0.95 && near > 0.2) col = ramp(${R.grass}.0, 0.3 + fine * 0.4);
-  } else {
-    float t = -0.06 + (light - 0.5) * 1.1 + zone.g * 0.8 + (broad - 0.5) * 0.55 + (fine - 0.5) * (mix(0.08, 0.38, near) + 0.4 * (1.0 - smoothstep(1.5, 6.0, dist))) + (coarse - 0.5) * mix(0.2, 0.6, near);
-    if (shade + (coarse - 0.5) * 0.3 > 0.5) {
-      col = ramp(${R.forestFloor}.0, t * 0.9 + 0.22 - shade * 0.25);
-    } else {
-      col = ramp(${R.grass}.0, t + 0.12);
-      // red flower strokes in the near grass
-      if (fine > 0.992 - 0.004 * near && coarse > 0.45 && dist < 70.0) col = vec3(0.64, 0.32, 0.17);
-    }
-  }
-  float haze = clamp((dist - uHaze.x) / (uHaze.y - uHaze.x), 0.0, 1.0) * uHaze.z;
-  col = mix(col, uHazeColor, floor(haze * 5.0 + fine) / 5.0);
-  gl_FragColor = vec4(col, 1.0);
-}
-`
-
-export function terrainMaterial(zones: THREE.Texture, rect: [number, number, number, number], haze: NonNullable<PaintOptions['haze']>) {
-  return new THREE.ShaderMaterial({
-    uniforms: {
-      ...shared,
-      uZones: { value: zones },
-      uZoneRect: { value: new THREE.Vector4(...rect) },
-      uHazeColor: { value: new THREE.Vector3(...hex(haze.color)) },
-      uHaze: { value: new THREE.Vector3(haze.start, haze.end, haze.max) },
-    },
-    vertexShader: MESH_VERTEX,
-    fragmentShader: TERRAIN_FRAGMENT,
-  })
-}
-
-const SPLAT_VERTEX = /* glsl */ `
+const DAB_VERTEX = /* glsl */ `
 attribute vec3 aPos;
-attribute float aSize;
-attribute vec3 aColor;
+attribute vec4 aData;   // extent x, extent y, turn, rank
+attribute vec4 aNormal; // surface normal, w: 1 for a lying dab
+attribute vec4 aColor;
 uniform float uPixel;
+uniform float uMinPx;
+uniform float uMaxSize;
 uniform float uSway;
 uniform float uTime;
 varying vec3 vColor;
 void main() {
-  vec3 p = aPos;
-  float phase = dot(aPos, vec3(1.3, 0.7, 1.1));
-  p.x += sin(uTime * 1.3 + phase) * uSway;
-  p.y += sin(uTime * 1.7 + phase * 1.3) * uSway * 0.5;
-  vec4 mv = viewMatrix * modelMatrix * vec4(p, 1.0);
-  // never smaller than a pixel, so far dabs do not flicker. Never huge, when the player walks into a bush
-  float size = clamp(aSize, -mv.z * uPixel * 1.2, -mv.z * uPixel * 12.0);
-  mv.xy += position.xy * size;
-  gl_Position = projectionMatrix * mv;
-  vColor = aColor;
+  vec3 pinned = aPos;
+  if (uSway > 0.0) {
+    float phase = dot(aPos, vec3(1.3, 0.7, 1.1));
+    pinned.x += sin(uTime * 1.3 + phase) * uSway;
+    pinned.y += sin(uTime * 1.7 + phase * 1.3) * uSway * 0.5;
+  }
+  vec4 world = modelMatrix * vec4(pinned, 1.0);
+  // true distance, not depth: turning the head must not change any dab
+  float dist = distance(world.xyz, cameraPosition);
+  float px = dist * uPixel;
+  float size = max(aData.x, aData.y);
+  // Far away a dab would be smaller than the least size. Then only a share of the dabs stays, by rank,
+  // and each one grows to stand for its neighbours. Rank is fixed, so strokes never swap.
+  float grow = max(1.0, uMinPx * px / size);
+  float alive = 1.0 - smoothstep(0.8, 1.2, aData.w * grow * grow) * smoothstep(1.0, 1.3, grow);
+  if (alive <= 0.0) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
+  float scale = grow * alive;
+  if (uMaxSize > 0.0) scale *= min(1.0, uMaxSize * uMinPx * px / size);
+  vColor = aColor.rgb;
+  vec4 view = viewMatrix * world;
+  if (aNormal.w < 0.5) {
+    view.xy += position.xy * aData.xy * scale;
+    gl_Position = projectionMatrix * view;
+    return;
+  }
+  // A lying dab: x runs along world X on the ground and up on a wall, y runs across it.
+  vec3 n = normalize(aNormal.xyz);
+  vec3 axis = abs(n.y) > 0.8 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
+  vec3 t = normalize(axis - n * dot(axis, n));
+  vec3 b = cross(n, t);
+  float c = cos(aData.z), s = sin(aData.z);
+  vec3 a = mat3(viewMatrix) * (t * c + b * s) * (aData.x * scale * 0.5);
+  vec3 d = mat3(viewMatrix) * (b * c - t * s) * (aData.y * scale * 0.5);
+  // Seen nearly edge on, the stroke is stood up just enough to stay a stroke and not a hair.
+  // A and D are the two half axes as they appear on screen, perspective included, in view units at the dab's depth.
+  float depth = -view.z;
+  if (depth < 0.05) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
+  vec2 A = a.xy + view.xy * a.z / depth;
+  vec2 D = d.xy + view.xy * d.z / depth;
+  float lA = length(A), lD = length(D);
+  float thin = abs(A.x * D.y - A.y * D.x) / max(max(lA, lD), 1e-6);
+  float need = uMinPx * 0.5 * px;
+  if (thin < need) {
+    if (lA > lD) {
+      vec2 perp = vec2(-A.y, A.x) / max(lA, 1e-6);
+      d.xy += perp * (dot(D, perp) < 0.0 ? -1.0 : 1.0) * (need - thin);
+    } else {
+      vec2 perp = vec2(-D.y, D.x) / max(lD, 1e-6);
+      a.xy += perp * (dot(A, perp) < 0.0 ? -1.0 : 1.0) * (need - thin);
+    }
+  }
+  view.xyz += a * position.x * 2.0 + d * position.y * 2.0;
+  gl_Position = projectionMatrix * view;
 }
 `
 
-const SPLAT_FRAGMENT = /* glsl */ `
+const FLAT_FRAGMENT = /* glsl */ `
 varying vec3 vColor;
 void main() { gl_FragColor = vec4(vColor, 1.0); }
 `
 
-/** Collects square dabs and builds one instanced mesh from them. */
-export class Splats {
-  private pos: number[] = []
-  private size: number[] = []
-  private color: number[] = []
+const INITIAL_DABS = 1 << 14
 
-  add(x: number, y: number, z: number, size: number, color: RGB) {
-    this.pos.push(x, y, z)
-    this.size.push(size)
-    this.color.push(...color)
+/** a square that turns to face the eye. `pinned` dabs never drop out with distance: window lights */
+export interface FacingDab {
+  at: Vec3
+  size: number
+  color: RGB
+  pinned?: boolean
+}
+
+/** a stroke that lies on a surface. ex runs along world X on the ground and up on a wall, ey across it */
+export interface LyingDab {
+  at: Vec3
+  normal: Vec3
+  ex: number
+  ey: number
+  turn: number
+  color: RGB
+}
+
+/** Collects dabs and builds one instanced mesh from them. */
+export class Dabs {
+  private pos = new Float32Array(INITIAL_DABS * 3)
+  private data = new Float32Array(INITIAL_DABS * 4)
+  private normal = new Int8Array(INITIAL_DABS * 4)
+  private color = new Uint8Array(INITIAL_DABS * 4)
+  private seed = 1
+  count = 0
+
+  private slot() {
+    if (this.count * 3 === this.pos.length) {
+      const pos = new Float32Array(this.pos.length * 2)
+      const data = new Float32Array(this.data.length * 2)
+      const normal = new Int8Array(this.normal.length * 2)
+      const color = new Uint8Array(this.color.length * 2)
+      pos.set(this.pos)
+      data.set(this.data)
+      normal.set(this.normal)
+      color.set(this.color)
+      this.pos = pos
+      this.data = data
+      this.normal = normal
+      this.color = color
+    }
+    return this.count++
   }
 
-  get count() {
-    return this.size.length
+  /** rank in 0..1: which dabs stay when the picture is far away. Low ranks stay longest */
+  private rank() {
+    this.seed = (Math.imul(this.seed, 1664525) + 1013904223) >>> 0
+    return this.seed / 4294967296
   }
 
-  build({ sway = 0, pixel = shared.uPixel }: { sway?: number; pixel?: { value: number } } = {}) {
-    const geometry = splatGeometry(this.count)
-    geometry.setAttribute('aPos', new THREE.InstancedBufferAttribute(new Float32Array(this.pos), 3))
-    geometry.setAttribute('aSize', new THREE.InstancedBufferAttribute(new Float32Array(this.size), 1))
-    geometry.setAttribute('aColor', new THREE.InstancedBufferAttribute(new Float32Array(this.color), 3))
-    const mesh = new THREE.Mesh(geometry, splatMaterial({ sway, pixel }))
+  face(dab: FacingDab) {
+    const i = this.slot()
+    this.pos.set(dab.at, i * 3)
+    this.data.set([dab.size, dab.size, 0, dab.pinned ? 0 : this.rank()], i * 4)
+    this.color.set([dab.color[0] * 255, dab.color[1] * 255, dab.color[2] * 255, 255], i * 4)
+  }
+
+  lie(dab: LyingDab) {
+    const i = this.slot()
+    this.pos.set(dab.at, i * 3)
+    this.data.set([dab.ex, dab.ey, dab.turn, this.rank()], i * 4)
+    this.normal.set([dab.normal[0] * 127, dab.normal[1] * 127, dab.normal[2] * 127, 127], i * 4)
+    this.color.set([dab.color[0] * 255, dab.color[1] * 255, dab.color[2] * 255, 255], i * 4)
+  }
+
+  /** sway: metres of wind movement. maxSize: largest size on screen in least sizes, for leaves the player can walk into */
+  build({ sway = 0, maxSize = 0 }: { sway?: number; maxSize?: number } = {}) {
+    const geometry = new THREE.InstancedBufferGeometry()
+    const quad = new THREE.PlaneGeometry(1, 1)
+    geometry.index = quad.index
+    geometry.setAttribute('position', quad.attributes.position)
+    const n = this.count
+    geometry.setAttribute('aPos', new THREE.InstancedBufferAttribute(this.pos.subarray(0, n * 3), 3))
+    geometry.setAttribute('aData', new THREE.InstancedBufferAttribute(this.data.subarray(0, n * 4), 4))
+    geometry.setAttribute('aNormal', new THREE.InstancedBufferAttribute(this.normal.subarray(0, n * 4), 4, true))
+    geometry.setAttribute('aColor', new THREE.InstancedBufferAttribute(this.color.subarray(0, n * 4), 4, true))
+    geometry.instanceCount = n
+    const material = new THREE.ShaderMaterial({
+      uniforms: { ...shared, uSway: { value: sway }, uMaxSize: { value: maxSize } },
+      vertexShader: DAB_VERTEX,
+      fragmentShader: FLAT_FRAGMENT,
+      // a lying stroke is seen from below when the eye is under its surface
+      side: THREE.DoubleSide,
+    })
+    const mesh = new THREE.Mesh(geometry, material)
     mesh.frustumCulled = false
     return mesh
   }
 }
 
-export function splatGeometry(count: number) {
-  const geometry = new THREE.InstancedBufferGeometry()
-  const quad = new THREE.PlaneGeometry(1, 1)
-  geometry.index = quad.index
-  geometry.setAttribute('position', quad.attributes.position)
-  geometry.instanceCount = count
-  return geometry
+// ---------- underpainting ----------
+
+const UNDER_VERTEX = /* glsl */ `
+attribute vec3 aColor;
+varying vec3 vColor;
+void main() {
+  vec4 local = vec4(position, 1.0);
+  vColor = aColor;
+  #ifdef USE_INSTANCING
+    local = instanceMatrix * local;
+  #endif
+  #ifdef USE_INSTANCING_COLOR
+    vColor = instanceColor;
+  #endif
+  gl_Position = projectionMatrix * viewMatrix * modelMatrix * local;
+}
+`
+
+/** flat colour per vertex, from the `aColor` attribute, or per instance */
+export function underMaterial(side: THREE.Side = THREE.DoubleSide) {
+  return new THREE.ShaderMaterial({ vertexShader: UNDER_VERTEX, fragmentShader: FLAT_FRAGMENT, side })
 }
 
-export function splatMaterial({ sway = 0, pixel = shared.uPixel }: { sway?: number; pixel?: { value: number } } = {}) {
-  return new THREE.ShaderMaterial({
-    uniforms: { uTime: shared.uTime, uPixel: pixel, uSway: { value: sway } },
-    vertexShader: SPLAT_VERTEX,
-    fragmentShader: SPLAT_FRAGMENT,
-  })
+interface Part {
+  geometry: THREE.BufferGeometry
+  ramp: RampName
+  /** shifts the tone of the whole part: negative is darker */
+  bias: number
 }
 
-/** Collects geometry parts, each tagged with a colour ramp, into one mesh. */
+/** Collects geometry parts, each with a colour ramp and a tone bias. */
 export class Parts {
-  private list: THREE.BufferGeometry[] = []
+  readonly list: Part[] = []
 
-  /** bias shifts the tone of the whole part: negative is darker */
-  add(source: THREE.BufferGeometry, ramp: RampName, bias = 0, matrix?: THREE.Matrix4) {
+  add(source: THREE.BufferGeometry, { ramp, bias = 0, matrix }: { ramp: RampName; bias?: number; matrix?: THREE.Matrix4 }) {
     const geometry = source.index ? source.toNonIndexed() : source
     geometry.deleteAttribute('uv')
+    if (!geometry.attributes.normal) geometry.computeVertexNormals()
     if (matrix) geometry.applyMatrix4(matrix)
-    const count = geometry.attributes.position.count
-    geometry.setAttribute('aRamp', new THREE.BufferAttribute(new Float32Array(count).fill(R[ramp]), 1))
-    geometry.setAttribute('aTone', new THREE.BufferAttribute(new Float32Array(count).fill(bias), 1))
-    this.list.push(geometry)
+    this.list.push({ geometry, ramp, bias })
   }
 
-  box(ramp: RampName, x: number, y: number, z: number, w: number, h: number, d: number, bias = 0) {
-    this.add(new THREE.BoxGeometry(w, h, d), ramp, bias, new THREE.Matrix4().makeTranslation(x, y, z))
+  box({ ramp, center, size, bias }: { ramp: RampName; center: Vec3; size: Vec3; bias?: number }) {
+    this.add(new THREE.BoxGeometry(...size), { ramp, bias, matrix: new THREE.Matrix4().makeTranslation(...center) })
   }
 
-  /** vertical cylinder or cone from y0 to y1 */
-  column(ramp: RampName, x: number, z: number, y0: number, y1: number, r0: number, r1: number, sides = 10, bias = 0) {
+  /** vertical cylinder or cone from y0 to y1, at x and z */
+  column({ ramp, x, z, y0, y1, r0, r1, sides = 10, bias }: { ramp: RampName; x: number; z: number; y0: number; y1: number; r0: number; r1: number; sides?: number; bias?: number }) {
     const geometry = new THREE.CylinderGeometry(r1, r0, y1 - y0, sides, 1, false)
-    this.add(geometry, ramp, bias, new THREE.Matrix4().makeTranslation(x, (y0 + y1) / 2, z))
+    this.add(geometry, { ramp, bias, matrix: new THREE.Matrix4().makeTranslation(x, (y0 + y1) / 2, z) })
   }
 
+  /** all parts as one geometry, in the order they were added */
   geometry() {
-    return mergeGeometries(this.list)
-  }
-
-  mesh(material: THREE.Material) {
-    const mesh = new THREE.Mesh(this.geometry(), material)
-    mesh.frustumCulled = false
-    return mesh
+    return mergeGeometries(this.list.map((part) => part.geometry))
   }
 }
 
-const SKY_FRAGMENT = /* glsl */ `
-${COMMON}
-varying vec3 vDir;
-float cloud(vec2 p) {
-  float warp = fbm(p * 0.8 + vec2(3.1, 8.2));
-  return fbm(p * 1.05 + vec2(warp * 1.7, warp)) * 0.62 + (1.0 - billow(p * 1.7 + 2.0)) * 0.38;
+export interface Style {
+  /** tone = base + part bias + light * this + chance */
+  base: number
+  light: number
+  /** random tone spread from dab to dab */
+  noise: number
+  /** soft patches of light and dark: strength and size in metres */
+  clump?: [number, number]
+  /** round things take the light from their vertex normals, not from each flat face */
+  smooth?: boolean
+  /** tone shift of the underpainting below the dabs */
+  under?: number
+  /** last touch on a mixed colour, by place: haze, mist */
+  tint?: (color: RGB, at: Vec3) => RGB
 }
-void main() {
-  vec3 d = normalize(vDir);
-  float el = asin(clamp(d.y, -1.0, 1.0));
-  float az = atan(d.x, -d.z);
-  vec2 p = vec2(az * 3.6, el * 4.4) + vec2(uTime * 0.004, 0.0);
-  float body = cloud(p);
-  // cumulus shading: edges that face the light, up and to the left, are bright; the far side is dark
-  float lit = clamp((body - cloud(p + vec2(-0.07, 0.1))) * 8.0, -0.12, 0.24);
-  float f = (body - 0.55) * 1.45 + 0.46 + lit;
-  f += (fbm(p * 5.0 + 5.0) - 0.5) * 0.1;
-  // bright bank above the castle, darker to the right and near the horizon
-  f += 0.17 * exp(-((az + 0.2) * (az + 0.2) * 2.2 + (el - 0.62) * (el - 0.62) * 5.0));
-  f -= 0.1 * smoothstep(-0.15, 0.45, az) + 0.04 * smoothstep(0.5, 0.05, el);
-  f += 0.06 * smoothstep(0.35, 1.0, el);
-  f += (bayer4(gl_FragCoord.xy) - 0.5) * 0.03;
-  #ifdef VEIL
-    // the veil repeats the sky clouds on a plane in front of the mountains: peaks show above it and through its gaps
-    float top = 0.33 + (fbm(vec2(az * 9.0, 2.0)) - 0.5) * 0.2;
-    if (f < 0.42 || el > top) discard;
-  #endif
-  vec3 col = vec3(0.102, 0.094, 0.188);
-  if (f > 0.2) col = vec3(0.188, 0.184, 0.337);
-  if (f > 0.33) col = vec3(0.275, 0.263, 0.388);
-  if (f > 0.45) col = vec3(0.365, 0.322, 0.416);
-  if (f > 0.54) col = vec3(0.416, 0.376, 0.431);
-  if (f > 0.61) col = vec3(0.459, 0.420, 0.439);
-  if (f > 0.7) col = vec3(0.533, 0.498, 0.443);
-  // a green tint in a few thin cloud gaps, as in the reference
-  if (f > 0.5 && f < 0.56 && fbm(p * 0.6 + 40.0) > 0.66) col = vec3(0.306, 0.380, 0.380);
-  // below the horizon the valley is lost in mist
-  float low = smoothstep(0.02, -0.12, el + (fbm(vec2(az * 6.0, 1.0)) - 0.5) * 0.06);
-  col = mix(col, vec3(0.161, 0.161, 0.318), floor(low * 4.0 + bayer4(gl_FragCoord.xy)) / 4.0);
-  gl_FragColor = vec4(col, 1.0);
-}
-`
 
-export function skyMaterial() {
-  return new THREE.ShaderMaterial({
-    uniforms: { ...shared },
-    vertexShader: /* glsl */ `
-      varying vec3 vDir;
-      void main() {
-        vDir = position;
-        vec4 p = projectionMatrix * vec4(mat3(viewMatrix) * position, 1.0);
-        gl_Position = p.xyww;
+export interface Scatter {
+  /** dabs per square metre of surface */
+  density: number
+  /** smallest and largest dab, metres */
+  size: [number, number]
+  /** lying strokes instead of facing squares: y extent as a share of x, and how far they turn at random */
+  lie?: { aspect: number; turn: number }
+  /** how far dabs stand off the surface at most, in their own sizes. Leaves stand off far, for a ragged outline */
+  lift?: number
+  /** now and then a dab in another colour: flowers */
+  accent?: { colors: RGB[]; chance: number }
+}
+
+function clumpAt(style: Style, [x, y, z]: Vec3) {
+  if (!style.clump) return 0
+  const k = 1 / style.clump[1]
+  return (noise(x * k + y * k * 0.61, z * k + y * k * 0.37) - 0.5) * style.clump[0]
+}
+
+export interface PaintOptions {
+  style: Style
+  /** with scatter, dabs and rand: dabs are scattered over every triangle */
+  scatter?: Scatter
+  dabs?: Dabs
+  rand?: () => number
+  /** moves the result in the world. The parts stay as built */
+  offset?: THREE.Vector3
+}
+
+/** Paints parts: returns the under mesh in flat tones, and scatters dabs over every triangle. */
+export function paint(parts: Parts, { style, scatter, dabs, rand, offset = new THREE.Vector3() }: PaintOptions) {
+  const geometry = parts.geometry()
+  const position = geometry.attributes.position
+  const normal = geometry.attributes.normal
+  const color = new Float32Array(position.count * 3)
+  const a = new THREE.Vector3()
+  const b = new THREE.Vector3()
+  const c = new THREE.Vector3()
+  const n = new THREE.Vector3()
+  const p = new THREE.Vector3()
+  const tinted = (rgb: RGB, at: Vec3) => (style.tint ? style.tint(rgb, at) : rgb)
+
+  let start = 0
+  for (const part of parts.list) {
+    const end = start + part.geometry.attributes.position.count
+    const shift = style.base + part.bias
+    for (let i = start; i < end; i += 3) {
+      a.fromBufferAttribute(position, i)
+      b.fromBufferAttribute(position, i + 1)
+      c.fromBufferAttribute(position, i + 2)
+      n.subVectors(b, a).cross(p.subVectors(c, a))
+      const area = n.length() / 2
+      n.normalize()
+
+      // under mesh: one tone per vertex
+      for (let v = i; v < i + 3; v++) {
+        const light = style.smooth ? lightOn(normal.getX(v), normal.getY(v), normal.getZ(v)) : lightOn(n.x, n.y, n.z)
+        const at: Vec3 = [position.getX(v) + offset.x, position.getY(v) + offset.y, position.getZ(v) + offset.z]
+        color.set(tinted(tone(part.ramp, shift + light * style.light + (style.under ?? 0)), at), v * 3)
       }
-    `,
-    fragmentShader: SKY_FRAGMENT,
-    side: THREE.BackSide,
-    depthWrite: false,
-    depthTest: false,
-  })
-}
 
-/** Sky clouds drawn on a plane in the world, so they can pass in front of far mountains. */
-export function cloudVeilMaterial() {
-  return new THREE.ShaderMaterial({
-    uniforms: { ...shared },
-    defines: { VEIL: 1 },
-    vertexShader: /* glsl */ `
-      varying vec3 vDir;
-      void main() {
-        vec4 world = modelMatrix * vec4(position, 1.0);
-        vDir = world.xyz - cameraPosition;
-        gl_Position = projectionMatrix * viewMatrix * world;
+      if (!scatter || !dabs || !rand) continue
+      const wanted = area * scatter.density
+      const count = Math.floor(wanted) + (rand() < wanted % 1 ? 1 : 0)
+      for (let k = 0; k < count; k++) {
+        // a uniform point of the triangle
+        let u = rand()
+        let w = rand()
+        if (u + w > 1) {
+          u = 1 - u
+          w = 1 - w
+        }
+        const at: Vec3 = [a.x + (b.x - a.x) * u + (c.x - a.x) * w + offset.x, a.y + (b.y - a.y) * u + (c.y - a.y) * w + offset.y, a.z + (b.z - a.z) * u + (c.z - a.z) * w + offset.z]
+        let light = lightOn(n.x, n.y, n.z)
+        if (style.smooth) {
+          const s = 1 - u - w
+          light = lightOn(
+            normal.getX(i) * s + normal.getX(i + 1) * u + normal.getX(i + 2) * w,
+            normal.getY(i) * s + normal.getY(i + 1) * u + normal.getY(i + 2) * w,
+            normal.getZ(i) * s + normal.getZ(i + 1) * u + normal.getZ(i + 2) * w,
+          )
+        }
+        const t = shift + light * style.light + (rand() - 0.5) * style.noise + clumpAt(style, at)
+        const accent = scatter.accent && rand() < scatter.accent.chance ? scatter.accent.colors[Math.floor(rand() * scatter.accent.colors.length)] : undefined
+        const rgb = accent ?? tinted(tone(part.ramp, t), at)
+        const size = lerp(scatter.size[0], scatter.size[1], rand())
+        // lifted off the surface, each by its own amount: where two overlap, the same one is always on top
+        const lift = size * (0.04 + rand() * (scatter.lift ?? 0.1))
+        const lifted: Vec3 = [at[0] + n.x * lift, at[1] + n.y * lift, at[2] + n.z * lift]
+        if (scatter.lie) dabs.lie({ at: lifted, normal: [n.x, n.y, n.z], ex: size, ey: size * scatter.lie.aspect, turn: (rand() - 0.5) * scatter.lie.turn, color: rgb })
+        else dabs.face({ at: lifted, size, color: rgb })
       }
-    `,
-    fragmentShader: SKY_FRAGMENT,
-    side: THREE.DoubleSide,
-  })
-}
+    }
+    start = end
+  }
 
-const MIST_FRAGMENT = /* glsl */ `
-${COMMON}
-varying vec2 vUv;
-uniform vec3 uA;
-uniform vec3 uB;
-uniform vec3 uC;
-uniform vec2 uScale;
-uniform float uSeed;
-uniform vec4 uShape;
-void main() {
-  vec2 p = vUv * uScale + uSeed + vec2(uTime * 0.006, 0.0);
-  float warp = fbm(p * 0.7 + 4.0);
-  float f = fbm(p + warp * 1.4) * 0.6 + (1.0 - billow(p * 1.3 + 3.0)) * 0.4;
-  // uShape: top row, billow height, edge band thickness, share of holes
-  float depth = uShape.x - vUv.y - (f - 0.5) * uShape.y * 2.0;
-  depth -= smoothstep(0.3, 0.5, abs(vUv.x - 0.5));
-  depth += (bayer4(gl_FragCoord.xy) - 0.5) * uShape.z * 0.5;
-  if (depth < 0.0 || fbm(p * 0.6 + 31.0) < uShape.w) discard;
-  // bright rim on top, then soft patches of the three tones inside
-  float tone = depth / uShape.z + (fbm(p * 2.6 + 9.0) - 0.5) * 4.0 * smoothstep(0.0, uShape.z * 3.0, depth);
-  vec3 col = tone < 1.0 ? uC : tone < 2.4 ? uB : uA;
-  gl_FragColor = vec4(col, 1.0);
-}
-`
-
-interface MistOptions {
-  /** dark, middle and light tones. The top rim is light */
-  colors: [string, string, string]
-  scale: [number, number]
-  seed: number
-  /** all in 0..1 of the plane height: where the bank ends, how far billows rise and fall, thickness of the edge tone */
-  top: number
-  billow: number
-  band: number
-  /** share of the bank cut away as gaps */
-  holes?: number
-}
-
-/** A flat bank of cloud: an fbm height line with billows, in three flat tones. */
-export function mistMaterial(options: MistOptions) {
-  return new THREE.ShaderMaterial({
-    uniforms: {
-      ...shared,
-      uA: { value: new THREE.Vector3(...hex(options.colors[0])) },
-      uB: { value: new THREE.Vector3(...hex(options.colors[1])) },
-      uC: { value: new THREE.Vector3(...hex(options.colors[2])) },
-      uScale: { value: new THREE.Vector2(...options.scale) },
-      uSeed: { value: options.seed },
-      uShape: { value: new THREE.Vector4(options.top, options.billow, options.band, options.holes ?? 0) },
-    },
-    vertexShader: /* glsl */ `
-      varying vec2 vUv;
-      void main() {
-        vUv = uv;
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-      }
-    `,
-    fragmentShader: MIST_FRAGMENT,
-    side: THREE.DoubleSide,
-  })
+  geometry.setAttribute('aColor', new THREE.BufferAttribute(color, 3))
+  const mesh = new THREE.Mesh(geometry, underMaterial())
+  mesh.position.copy(offset)
+  mesh.frustumCulled = false
+  return mesh
 }
