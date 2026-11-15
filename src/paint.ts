@@ -1,15 +1,16 @@
-// Dab painting. The whole world is made of brush dabs pinned to points in 3D, after https://patch.gg/blendi/oil-paint,
-// with a much simpler brush: a dab is one flat-coloured rectangle. No brush texture, no lighting in the shader.
+// Dab painting, after https://patch.gg/blendi/oil-paint. The whole world is made of brush dabs pinned to points in 3D.
 //
-//   under mesh ── coarse geometry in flat colours, so nothing shows between the dabs
-//   dabs ──────── instanced quads. `face` dabs are squares that turn to the eye (leaves, rock, cloud).
-//                 `lie` dabs are strokes that lie on their surface (ground, walls, bark).
+//   under ── coarse geometry in flat colours: the underpainting, so nothing shows between the dabs
+//   dabs ─── instanced cards, each one mark of the brush sheet (brush.ts) in one mixed colour, run along a
+//            direction of the world. `face` dabs turn to the eye (leaves, bark, cloud). `lie` dabs lie on their
+//            surface (ground, walls, rock) and are stood up when seen edge on.
 //
-// Colours are mixed once, when the world is built: a tone from a small ramp, picked by light and chance.
+// Colours are mixed once, when the world is built: a tone from a ramp, picked by light and chance. The shader only
+// breaks each colour a little, streaks a lighter one into it, and lets a light rake across the thick paint.
 // Because every dab is pinned to the world, the paint stays on things as the eye moves. Far away only a share of
 // the dabs is drawn, each grown to stand for its neighbours; which ones stay never changes.
 import * as THREE from 'three'
-import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
+import { BRUSH_COLUMNS, BRUSH_ROWS, createBrushSheet } from './brush.ts'
 
 // ---------- math and noise ----------
 
@@ -98,32 +99,36 @@ export function hex(color: string): RGB {
   return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255]
 }
 
-// Colours measured from the reference video, dark to light.
+// Colours measured from the reference video, dark to light, then made more saturated: the video's colours are
+// washed out. The grade in main.ts pulls them together again.
 const RAMPS = {
-  grass: ['#2c411b', '#3a4f26', '#4a592c', '#5c662f', '#6e6e33', '#807532'].map(hex),
-  forestFloor: ['#020805', '#09100d', '#111917', '#1b2a1c', '#29371d', '#394d24'].map(hex),
-  path: ['#7c6e3e', '#957945', '#ab925c', '#baa46b', '#cfb87a', '#e6d5a4'].map(hex),
-  bark: ['#000100', '#040806', '#0a0f0c', '#111613', '#1a211c', '#252e28'].map(hex),
-  canopy: ['#000101', '#030806', '#09100d', '#111917', '#1b2424', '#2a3a34'].map(hex),
-  conifer: ['#0a100e', '#131d18', '#1c2b26', '#24382f', '#2e4541', '#3a5548'].map(hex),
-  bushy: ['#161e1b', '#232e21', '#333d29', '#454f31', '#56643a', '#69794b'].map(hex),
-  roof: ['#27181b', '#3d211f', '#502f27', '#6c3d34', '#8a4a33', '#a3512c'].map(hex),
-  wall: ['#343d43', '#5c5b4b', '#86715a', '#a08a66', '#ae9871', '#c8b48a'].map(hex),
-  castle: ['#0b0b1c', '#0f0f24', '#13132b', '#181833', '#1e1e3d', '#272749'].map(hex),
-  crag: ['#0c0c1e', '#111127', '#161630', '#1d1d3b', '#27274f', '#373863'].map(hex),
-  cragTree: ['#07070f', '#0a0b17', '#0d0f1e', '#111425', '#151a2b', '#1a2132'].map(hex),
-  mountain: ['#1b1a38', '#25244a', '#2f2e56', '#3b3a5f', '#4a4666', '#5f5670'].map(hex),
+  grass: ['#144613', '#24541d', '#395e1f', '#4d6c18', '#647310', '#797900'].map(hex),
+  forestFloor: ['#000905', '#06110d', '#0d1a18', '#102c19', '#1f3a14', '#295112'].map(hex),
+  path: ['#7d6e38', '#97783e', '#ad9255', '#bca464', '#d1b873', '#e8d59f'].map(hex),
+  bark: ['#000100', '#030806', '#08100b', '#0f1712', '#18221b', '#222f27'].map(hex),
+  canopy: ['#000101', '#010906', '#06110c', '#0d1a17', '#102c1c', '#1f4329'].map(hex),
+  conifer: ['#08110e', '#0e1e17', '#152d25', '#1a3a2d', '#224742', '#2d5845'].map(hex),
+  bushy: ['#121f1c', '#1b301f', '#2b4024', '#3c5327', '#49692a', '#5a7e3b'].map(hex),
+  roof: ['#2b161a', '#431c1a', '#582a1f', '#773529', '#993e1a', '#b24300'].map(hex),
+  wall: ['#323d45', '#5d5b47', '#8a7053', '#a5895b', '#b39765', '#ccb37e'].map(hex),
+  castle: ['#0b0a1e', '#0f0e27', '#13122e', '#181736', '#1e1d41', '#27264d'].map(hex),
+  crag: ['#0c0b20', '#11102a', '#161533', '#1d1c3f', '#272654', '#363768'].map(hex),
+  cragTree: ['#070711', '#090a1a', '#0c0e22', '#101329', '#131930', '#182137'].map(hex),
+  mountain: ['#1b193c', '#25234f', '#2f2d5b', '#3b3964', '#4a456a', '#605573'].map(hex),
 }
 
 export type RampName = keyof typeof RAMPS
 
-/** the tone of a ramp for t in 0..1, dark to light */
-export function tone(name: RampName, t: number): RGB {
-  return RAMPS[name][Math.min(TONES - 1, Math.max(0, Math.floor(t * TONES)))]
-}
-
 export function mixColor(a: RGB, b: RGB, t: number): RGB {
   return [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)]
+}
+
+/** the colour of a ramp for t in 0..1, dark to light, mixed between its two nearest tones */
+export function tone(name: RampName, t: number): RGB {
+  const ramp = RAMPS[name]
+  const f = clamp(t * TONES - 0.5, 0, TONES - 1)
+  const i = Math.min(TONES - 2, Math.floor(f))
+  return mixColor(ramp[i], ramp[i + 1], f - i)
 }
 
 export const LIGHT_DIR = new THREE.Vector3(-0.55, 0.75, 0.35).normalize()
@@ -131,114 +136,221 @@ export const LIGHT_DIR = new THREE.Vector3(-0.55, 0.75, 0.35).normalize()
 /** how lit a surface with this normal is, 0..1 */
 export const lightOn = (nx: number, ny: number, nz: number) => (nx * LIGHT_DIR.x + ny * LIGHT_DIR.y + nz * LIGHT_DIR.z) * 0.5 + 0.5
 
-/** Uniforms shared by every dab mesh. Set on resize. */
+/** Uniforms shared by every dab mesh. uPixel and uRef are set on resize. */
 export const shared = {
   uTime: { value: 0 },
   // world size of one screen pixel at distance 1
   uPixel: { value: 0.001 },
-  // least size of a dab on screen, in pixels
-  uMinPx: { value: 4 },
+  // screen pixels in one pixel of the reference frame: dab sizes on screen are given in reference pixels
+  uRef: { value: 4 },
+  // how strongly the light rakes across the thick paint
+  uImpasto: { value: 1.1 },
+  tBrush: { value: createBrushSheet() },
 }
 
 // ---------- dabs ----------
 
 const DAB_VERTEX = /* glsl */ `
 attribute vec3 aPos;
-attribute vec4 aData;   // extent x, extent y, turn, rank
-attribute vec4 aNormal; // surface normal, w: 1 for a lying dab
-attribute vec4 aColor;
+attribute vec3 aData;   // across, along (metres), rank
+attribute vec4 aDir;    // the way the stroke runs. w: how far it is pulled toward the eye, in its own sizes
+attribute vec4 aNormal; // the surface it is on, or nothing. w: 1 for a lying dab
+attribute vec4 aColor;  // a: which marks of the brush sheet, and whether it is pinned by its foot
 uniform float uPixel;
-uniform float uMinPx;
-uniform float uMaxSize;
-uniform float uSway;
+uniform float uRef;
 uniform float uTime;
-varying vec3 vColor;
+uniform float uSway;
+uniform float uSalt;
+uniform vec2 uMin;
+uniform vec2 uMax;
+varying vec2 vUv;
+varying vec3 vC1;
+varying vec3 vC2;
+varying vec4 vAxis;
+const float TAU = 6.28318530718;
+
+vec4 hash4(float n) {
+  vec4 q = fract(vec4(n) * vec4(0.1031, 0.1030, 0.0973, 0.1099));
+  q += dot(q, q.wzxy + 33.33);
+  return fract((q.xxyz + q.yzzw) * q.zywx);
+}
+
+// Broken colour: every dab is mixed a little differently on the palette (hue, strength, value).
+vec3 jitter(vec3 c, vec3 r, float amount) {
+  float a = (r.y - 0.5) * 0.9 * amount;
+  vec3 k = vec3(0.57735);
+  c = c * cos(a) + cross(k, c) * sin(a) + k * dot(k, c) * (1.0 - cos(a));
+  float g = dot(c, vec3(0.3, 0.59, 0.11));
+  c = mix(vec3(g), c, 1.0 + (r.z - 0.5) * 0.7 * amount);
+  return max(c * (1.0 + (r.x - 0.5) * 0.5 * amount), 0.0);
+}
+
 void main() {
+  vec4 r = hash4(float(gl_InstanceID) * 1.37 + uSalt);
+  float code = floor(aColor.a * 255.0 + 0.5);
+  float foot = step(128.0, code);
+  code -= foot * 128.0;
+  float first = floor(code / 16.0);
+  float count = code - first * 16.0;
+
+  vec3 dir = aDir.xyz;
   vec3 pinned = aPos;
   if (uSway > 0.0) {
     float phase = dot(aPos, vec3(1.3, 0.7, 1.1));
-    pinned.x += sin(uTime * 1.3 + phase) * uSway;
-    pinned.y += sin(uTime * 1.7 + phase * 1.3) * uSway * 0.5;
+    vec3 wind = vec3(sin(uTime * 1.3 + phase), 0.5 * sin(uTime * 1.7 + phase * 1.3), 0.6 * sin(uTime * 1.1 + phase * 0.7)) * uSway;
+    // a blade bends from its foot, a leaf moves whole
+    if (foot > 0.5) dir += wind * 3.0;
+    else pinned += wind;
   }
-  vec4 world = modelMatrix * vec4(pinned, 1.0);
+  vec4 vc = viewMatrix * modelMatrix * vec4(pinned, 1.0);
+  float depth = -vc.z;
+  if (depth < 0.08) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
   // true distance, not depth: turning the head must not change any dab
-  float dist = distance(world.xyz, cameraPosition);
-  float px = dist * uPixel;
-  float size = max(aData.x, aData.y);
+  float px = length(vc.xyz) * uPixel * uRef;
   // Far away a dab would be smaller than the least size. Then only a share of the dabs stays, by rank,
   // and each one grows to stand for its neighbours. Rank is fixed, so strokes never swap.
-  float grow = max(1.0, uMinPx * px / size);
-  float alive = 1.0 - smoothstep(0.8, 1.2, aData.w * grow * grow) * smoothstep(1.0, 1.3, grow);
+  vec2 size = max(aData.xy, uMin * px);
+  float cover = size.x * size.y / (aData.x * aData.y);
+  float alive = 1.0 - smoothstep(0.8, 1.2, aData.z * cover) * smoothstep(1.0, 1.3, cover);
   if (alive <= 0.0) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
-  float scale = grow * alive;
-  if (uMaxSize > 0.0) scale *= min(1.0, uMaxSize * uMinPx * px / size);
-  vColor = aColor.rgb;
-  vec4 view = viewMatrix * world;
-  if (aNormal.w < 0.5) {
-    view.xy += position.xy * aData.xy * scale;
-    gl_Position = projectionMatrix * view;
-    return;
-  }
-  // A lying dab: x runs along world X on the ground and up on a wall, y runs across it.
-  vec3 n = normalize(aNormal.xyz);
-  vec3 axis = abs(n.y) > 0.8 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
-  vec3 t = normalize(axis - n * dot(axis, n));
-  vec3 b = cross(n, t);
-  float c = cos(aData.z), s = sin(aData.z);
-  vec3 a = mat3(viewMatrix) * (t * c + b * s) * (aData.x * scale * 0.5);
-  vec3 d = mat3(viewMatrix) * (b * c - t * s) * (aData.y * scale * 0.5);
-  // Seen nearly edge on, the stroke is stood up just enough to stay a stroke and not a hair.
-  // A and D are the two half axes as they appear on screen, perspective included, in view units at the dab's depth.
-  float depth = -view.z;
-  if (depth < 0.05) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
-  vec2 A = a.xy + view.xy * a.z / depth;
-  vec2 D = d.xy + view.xy * d.z / depth;
-  float lA = length(A), lD = length(D);
-  float thin = abs(A.x * D.y - A.y * D.x) / max(max(lA, lD), 1e-6);
-  float need = uMinPx * 0.5 * px;
-  if (thin < need) {
-    if (lA > lD) {
-      vec2 perp = vec2(-A.y, A.x) / max(lA, 1e-6);
-      d.xy += perp * (dot(D, perp) < 0.0 ? -1.0 : 1.0) * (need - thin);
-    } else {
-      vec2 perp = vec2(-D.y, D.x) / max(lD, 1e-6);
-      a.xy += perp * (dot(A, perp) < 0.0 ? -1.0 : 1.0) * (need - thin);
+  if (uMax.x > 0.0) size = min(size, uMax * px);
+  vec2 half_ = size * 0.5 * alive;
+
+  vec2 across, along;
+  if (aNormal.w > 0.5) {
+    // A lying dab: a real patch of its surface, run along dir.
+    vec3 n = normalize(aNormal.xyz);
+    vec3 A = dir - n * dot(dir, n);
+    A = dot(A, A) > 1e-6 ? normalize(A) : normalize(cross(n, abs(n.x) > 0.9 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0)));
+    vec3 a = mat3(viewMatrix) * A * half_.y;
+    vec3 b = mat3(viewMatrix) * cross(n, A) * half_.x;
+    // Seen nearly edge on, the stroke is stood up just enough to stay a stroke and not a hair.
+    // sa and sb are the two half axes as they appear on screen, perspective included.
+    vec2 sa = a.xy + vc.xy * a.z / depth;
+    vec2 sb = b.xy + vc.xy * b.z / depth;
+    float la = length(sa), lb = length(sb);
+    float thin = abs(sa.x * sb.y - sa.y * sb.x) / max(max(la, lb), 1e-6);
+    float need = uMin.x * 0.5 * px * alive;
+    if (thin < need) {
+      if (la > lb) {
+        vec2 perp = vec2(-sa.y, sa.x) / max(la, 1e-6);
+        b.xy += perp * (dot(sb, perp) < 0.0 ? -1.0 : 1.0) * (need - thin);
+      } else {
+        vec2 perp = vec2(-sb.y, sb.x) / max(lb, 1e-6);
+        a.xy += perp * (dot(sa, perp) < 0.0 ? -1.0 : 1.0) * (need - thin);
+      }
     }
+    vc.xyz += a * position.y + b * position.x;
+    along = normalize(sa + 1e-6);
+    across = normalize(sb + 1e-6);
+  } else {
+    // A card that faces the eye. One with a normal is on a solid thing: it is not painted from behind.
+    if (dot(aNormal.xyz, aNormal.xyz) > 0.25 && dot(aNormal.xyz, cameraPosition - pinned) < 0.0) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
+    vec3 vd = mat3(viewMatrix) * normalize(dir);
+    float flatness = length(vd.xy);
+    along = flatness > 1e-4 ? vd.xy / flatness : vec2(0.0, 1.0);
+    // a stroke that points at the eye has no direction on the canvas: give it its own
+    along = normalize(mix(vec2(cos(r.x * TAU), sin(r.x * TAU)), along, smoothstep(0.08, 0.4, flatness)));
+    across = vec2(along.y, -along.x);
+    // pulled toward the eye, so it is never buried in the thing it is pinned to
+    vc.xyz *= 1.0 - clamp(aDir.w * max(half_.x, half_.y) * (0.6 + 0.8 * r.y) / depth, -0.3, 0.3);
+    vc.xy += across * position.x * half_.x + along * (position.y + foot) * half_.y;
   }
-  view.xyz += a * position.x * 2.0 + d * position.y * 2.0;
-  gl_Position = projectionMatrix * view;
+  gl_Position = projectionMatrix * vc;
+
+  float cell = first + floor(r.z * count * 0.999);
+  // laid mirrored or with either end first, so one mark does not repeat
+  float flip = r.w > 0.5 ? -1.0 : 1.0;
+  float end_ = foot < 0.5 && fract(r.x * 7.13) > 0.5 ? -1.0 : 1.0;
+  vec2 q = vec2(position.x * flip, position.y * end_) * 0.5 + 0.5;
+  vUv = (vec2(mod(cell, ${BRUSH_COLUMNS}.0), floor(cell / ${BRUSH_COLUMNS}.0)) + q) / vec2(${BRUSH_COLUMNS}.0, ${BRUSH_ROWS}.0);
+  vC1 = jitter(aColor.rgb, r.yzw, 0.4);
+  vC2 = jitter(vC1 * 1.22 + 0.012, r.wxy, 0.5);
+  vAxis = vec4(across * flip, along * end_);
 }
 `
 
-const FLAT_FRAGMENT = /* glsl */ `
-varying vec3 vColor;
-void main() { gl_FragColor = vec4(vColor, 1.0); }
+const DAB_FRAGMENT = /* glsl */ `
+uniform sampler2D tBrush;
+uniform float uImpasto;
+varying vec2 vUv;
+varying vec3 vC1;
+varying vec3 vC2;
+varying vec4 vAxis;
+void main() {
+  vec4 t = texture2D(tBrush, vUv);
+  if (t.g < 0.3) discard;
+  vec2 e = vec2(1.5 / 512.0, 0.0);
+  float hu = texture2D(tBrush, vUv + e.xy).r - texture2D(tBrush, vUv - e.xy).r;
+  float hv = texture2D(tBrush, vUv + e.yx).r - texture2D(tBrush, vUv - e.yx).r;
+  // the paint stands up off the canvas and the room's light, from the upper left, rakes across it
+  vec2 g = vAxis.xy * hu + vAxis.zw * hv;
+  float rake = 0.5 * g.x - 0.7 * g.y;
+  vec3 col = mix(vC1, vC2, smoothstep(0.52, 0.78, t.b));
+  col *= mix(0.95, 1.04, t.r);
+  col *= 1.0 + rake * 1.25 * uImpasto;
+  // the glint on a ridge of paint: none on dark paint, or the shade would glitter
+  col += vec3(1.0, 0.97, 0.9) * pow(max(rake, 0.0), 2.0) * uImpasto * 2.4 * dot(col, vec3(0.3, 0.59, 0.11));
+  gl_FragColor = vec4(col, smoothstep(0.3, 0.62, t.g));
+}
 `
 
-const INITIAL_DABS = 1 << 14
+/** Which marks of the brush sheet a dab may use: the first cell and how many. See KINDS in brush.ts. */
+const marks = (first: number, count: number) => first * 16 + count
+export const MARKS = {
+  any: marks(0, 8),
+  strokes: marks(0, 4),
+  blades: marks(0, 3),
+  frond: marks(3, 1),
+  pressed: marks(4, 2),
+}
+const FOOT = 128
 
-/** a square that turns to face the eye. `pinned` dabs never drop out with distance: window lights */
+/** A card that turns to face the eye and runs along `dir` on the canvas. */
 export interface FacingDab {
   at: Vec3
-  size: number
+  dir: Vec3
+  /** across and along, metres */
+  size: [number, number]
   color: RGB
+  marks?: number
+  /** how far it is pulled toward the eye, in its own sizes, -1..1. Negative pushes it back: the dark inside of a crown */
+  lift?: number
+  /** the surface it is on. With one, the dab is not drawn from behind */
+  normal?: Vec3
+  /** pinned by its foot instead of its middle: a blade of grass */
+  foot?: boolean
+  /** never drops out with distance: window lights */
   pinned?: boolean
 }
 
-/** a stroke that lies on a surface. ex runs along world X on the ground and up on a wall, ey across it */
+/** A stroke that lies on a surface and runs along `dir`. */
 export interface LyingDab {
   at: Vec3
   normal: Vec3
-  ex: number
-  ey: number
-  turn: number
+  dir: Vec3
+  size: [number, number]
   color: RGB
+  marks?: number
 }
+
+export interface DabLimits {
+  /** least size on screen, across and along, in reference pixels */
+  min: [number, number]
+  /** largest size on screen: for things the player can walk into */
+  max?: [number, number]
+  /** metres of wind movement */
+  sway?: number
+}
+
+const INITIAL_DABS = 1 << 14
+let meshes = 0
 
 /** Collects dabs and builds one instanced mesh from them. */
 export class Dabs {
   private pos = new Float32Array(INITIAL_DABS * 3)
-  private data = new Float32Array(INITIAL_DABS * 4)
+  private data = new Float32Array(INITIAL_DABS * 3)
+  private dir = new Int8Array(INITIAL_DABS * 4)
   private normal = new Int8Array(INITIAL_DABS * 4)
   private color = new Uint8Array(INITIAL_DABS * 4)
   private seed = 1
@@ -248,14 +360,17 @@ export class Dabs {
     if (this.count * 3 === this.pos.length) {
       const pos = new Float32Array(this.pos.length * 2)
       const data = new Float32Array(this.data.length * 2)
+      const dir = new Int8Array(this.dir.length * 2)
       const normal = new Int8Array(this.normal.length * 2)
       const color = new Uint8Array(this.color.length * 2)
       pos.set(this.pos)
       data.set(this.data)
+      dir.set(this.dir)
       normal.set(this.normal)
       color.set(this.color)
       this.pos = pos
       this.data = data
+      this.dir = dir
       this.normal = normal
       this.color = color
     }
@@ -268,39 +383,56 @@ export class Dabs {
     return this.seed / 4294967296
   }
 
+  /** what both kinds share: the place, the direction, the colour and the marks. `foot` is added by face() */
+  private put(i: number, dab: FacingDab | LyingDab) {
+    const length = Math.hypot(...dab.dir) || 1
+    this.pos.set(dab.at, i * 3)
+    this.dir.set([(dab.dir[0] / length) * 127, (dab.dir[1] / length) * 127, (dab.dir[2] / length) * 127], i * 4)
+    this.color.set([clamp(dab.color[0], 0, 1) * 255, clamp(dab.color[1], 0, 1) * 255, clamp(dab.color[2], 0, 1) * 255, dab.marks ?? MARKS.any], i * 4)
+  }
+
   face(dab: FacingDab) {
     const i = this.slot()
-    this.pos.set(dab.at, i * 3)
-    this.data.set([dab.size, dab.size, 0, dab.pinned ? 0 : this.rank()], i * 4)
-    this.color.set([dab.color[0] * 255, dab.color[1] * 255, dab.color[2] * 255, 255], i * 4)
+    this.put(i, dab)
+    if (dab.foot) this.color[i * 4 + 3] += FOOT
+    this.data.set([dab.size[0], dab.size[1], dab.pinned ? 0 : this.rank()], i * 3)
+    this.dir[i * 4 + 3] = clamp(dab.lift ?? 0.5, -1, 1) * 127
+    if (dab.normal) this.normal.set([dab.normal[0] * 127, dab.normal[1] * 127, dab.normal[2] * 127], i * 4)
   }
 
   lie(dab: LyingDab) {
     const i = this.slot()
-    this.pos.set(dab.at, i * 3)
-    this.data.set([dab.ex, dab.ey, dab.turn, this.rank()], i * 4)
+    this.put(i, dab)
+    this.data.set([dab.size[0], dab.size[1], this.rank()], i * 3)
     this.normal.set([dab.normal[0] * 127, dab.normal[1] * 127, dab.normal[2] * 127, 127], i * 4)
-    this.color.set([dab.color[0] * 255, dab.color[1] * 255, dab.color[2] * 255, 255], i * 4)
   }
 
-  /** sway: metres of wind movement. maxSize: largest size on screen in least sizes, for leaves the player can walk into */
-  build({ sway = 0, maxSize = 0 }: { sway?: number; maxSize?: number } = {}) {
+  build({ min, max = [0, 0], sway = 0 }: DabLimits) {
     const geometry = new THREE.InstancedBufferGeometry()
-    const quad = new THREE.PlaneGeometry(1, 1)
-    geometry.index = quad.index
-    geometry.setAttribute('position', quad.attributes.position)
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute([-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0], 3))
+    geometry.setIndex([0, 1, 2, 0, 2, 3])
     const n = this.count
     geometry.setAttribute('aPos', new THREE.InstancedBufferAttribute(this.pos.subarray(0, n * 3), 3))
-    geometry.setAttribute('aData', new THREE.InstancedBufferAttribute(this.data.subarray(0, n * 4), 4))
+    geometry.setAttribute('aData', new THREE.InstancedBufferAttribute(this.data.subarray(0, n * 3), 3))
+    geometry.setAttribute('aDir', new THREE.InstancedBufferAttribute(this.dir.subarray(0, n * 4), 4, true))
     geometry.setAttribute('aNormal', new THREE.InstancedBufferAttribute(this.normal.subarray(0, n * 4), 4, true))
     geometry.setAttribute('aColor', new THREE.InstancedBufferAttribute(this.color.subarray(0, n * 4), 4, true))
     geometry.instanceCount = n
     const material = new THREE.ShaderMaterial({
-      uniforms: { ...shared, uSway: { value: sway }, uMaxSize: { value: maxSize } },
+      uniforms: {
+        ...shared,
+        uMin: { value: new THREE.Vector2(...min) },
+        uMax: { value: new THREE.Vector2(...max) },
+        uSway: { value: sway },
+        // so two meshes do not lay the same run of marks
+        uSalt: { value: 5.1 + 77.7 * meshes++ },
+      },
       vertexShader: DAB_VERTEX,
-      fragmentShader: FLAT_FRAGMENT,
+      fragmentShader: DAB_FRAGMENT,
       // a lying stroke is seen from below when the eye is under its surface
       side: THREE.DoubleSide,
+      // the soft edge of a mark is cut by the antialiasing samples: no sorting, no blending
+      alphaToCoverage: true,
     })
     const mesh = new THREE.Mesh(geometry, material)
     mesh.frustumCulled = false
@@ -314,173 +446,46 @@ const UNDER_VERTEX = /* glsl */ `
 attribute vec3 aColor;
 varying vec3 vColor;
 void main() {
-  vec4 local = vec4(position, 1.0);
   vColor = aColor;
-  #ifdef USE_INSTANCING
-    local = instanceMatrix * local;
-  #endif
-  #ifdef USE_INSTANCING_COLOR
-    vColor = instanceColor;
-  #endif
-  gl_Position = projectionMatrix * viewMatrix * modelMatrix * local;
+  gl_Position = projectionMatrix * viewMatrix * modelMatrix * vec4(position, 1.0);
 }
 `
 
-/** flat colour per vertex, from the `aColor` attribute, or per instance */
-export function underMaterial(side: THREE.Side = THREE.DoubleSide) {
-  return new THREE.ShaderMaterial({ vertexShader: UNDER_VERTEX, fragmentShader: FLAT_FRAGMENT, side })
+const UNDER_FRAGMENT = /* glsl */ `
+varying vec3 vColor;
+void main() { gl_FragColor = vec4(vColor, 1.0); }
+`
+
+/** flat colour per vertex, from the `aColor` attribute */
+export function underMaterial() {
+  return new THREE.ShaderMaterial({ vertexShader: UNDER_VERTEX, fragmentShader: UNDER_FRAGMENT, side: THREE.DoubleSide })
 }
 
-interface Part {
-  geometry: THREE.BufferGeometry
-  ramp: RampName
-  /** shifts the tone of the whole part: negative is darker */
-  bias: number
-}
+/** Collects coloured triangles and builds one mesh from them. */
+export class Under {
+  private chunks: { position: ArrayLike<number>; color: ArrayLike<number> }[] = []
+  private length = 0
 
-/** Collects geometry parts, each with a colour ramp and a tone bias. */
-export class Parts {
-  readonly list: Part[] = []
-
-  add(source: THREE.BufferGeometry, { ramp, bias = 0, matrix }: { ramp: RampName; bias?: number; matrix?: THREE.Matrix4 }) {
-    const geometry = source.index ? source.toNonIndexed() : source
-    geometry.deleteAttribute('uv')
-    if (!geometry.attributes.normal) geometry.computeVertexNormals()
-    if (matrix) geometry.applyMatrix4(matrix)
-    this.list.push({ geometry, ramp, bias })
+  /** triangles without an index: three numbers a vertex, and a colour for each vertex */
+  push(position: ArrayLike<number>, color: ArrayLike<number>) {
+    this.chunks.push({ position, color })
+    this.length += position.length
   }
 
-  box({ ramp, center, size, bias }: { ramp: RampName; center: Vec3; size: Vec3; bias?: number }) {
-    this.add(new THREE.BoxGeometry(...size), { ramp, bias, matrix: new THREE.Matrix4().makeTranslation(...center) })
-  }
-
-  /** vertical cylinder or cone from y0 to y1, at x and z */
-  column({ ramp, x, z, y0, y1, r0, r1, sides = 10, bias }: { ramp: RampName; x: number; z: number; y0: number; y1: number; r0: number; r1: number; sides?: number; bias?: number }) {
-    const geometry = new THREE.CylinderGeometry(r1, r0, y1 - y0, sides, 1, false)
-    this.add(geometry, { ramp, bias, matrix: new THREE.Matrix4().makeTranslation(x, (y0 + y1) / 2, z) })
-  }
-
-  /** all parts as one geometry, in the order they were added */
-  geometry() {
-    return mergeGeometries(this.list.map((part) => part.geometry))
-  }
-}
-
-export interface Style {
-  /** tone = base + part bias + light * this + chance */
-  base: number
-  light: number
-  /** random tone spread from dab to dab */
-  noise: number
-  /** soft patches of light and dark: strength and size in metres */
-  clump?: [number, number]
-  /** round things take the light from their vertex normals, not from each flat face */
-  smooth?: boolean
-  /** tone shift of the underpainting below the dabs */
-  under?: number
-  /** last touch on a mixed colour, by place: haze, mist */
-  tint?: (color: RGB, at: Vec3) => RGB
-}
-
-export interface Scatter {
-  /** dabs per square metre of surface */
-  density: number
-  /** smallest and largest dab, metres */
-  size: [number, number]
-  /** lying strokes instead of facing squares: y extent as a share of x, and how far they turn at random */
-  lie?: { aspect: number; turn: number }
-  /** how far dabs stand off the surface at most, in their own sizes. Leaves stand off far, for a ragged outline */
-  lift?: number
-  /** now and then a dab in another colour: flowers */
-  accent?: { colors: RGB[]; chance: number }
-}
-
-function clumpAt(style: Style, [x, y, z]: Vec3) {
-  if (!style.clump) return 0
-  const k = 1 / style.clump[1]
-  return (noise(x * k + y * k * 0.61, z * k + y * k * 0.37) - 0.5) * style.clump[0]
-}
-
-export interface PaintOptions {
-  style: Style
-  /** with scatter, dabs and rand: dabs are scattered over every triangle */
-  scatter?: Scatter
-  dabs?: Dabs
-  rand?: () => number
-  /** moves the result in the world. The parts stay as built */
-  offset?: THREE.Vector3
-}
-
-/** Paints parts: returns the under mesh in flat tones, and scatters dabs over every triangle. */
-export function paint(parts: Parts, { style, scatter, dabs, rand, offset = new THREE.Vector3() }: PaintOptions) {
-  const geometry = parts.geometry()
-  const position = geometry.attributes.position
-  const normal = geometry.attributes.normal
-  const color = new Float32Array(position.count * 3)
-  const a = new THREE.Vector3()
-  const b = new THREE.Vector3()
-  const c = new THREE.Vector3()
-  const n = new THREE.Vector3()
-  const p = new THREE.Vector3()
-  const tinted = (rgb: RGB, at: Vec3) => (style.tint ? style.tint(rgb, at) : rgb)
-
-  let start = 0
-  for (const part of parts.list) {
-    const end = start + part.geometry.attributes.position.count
-    const shift = style.base + part.bias
-    for (let i = start; i < end; i += 3) {
-      a.fromBufferAttribute(position, i)
-      b.fromBufferAttribute(position, i + 1)
-      c.fromBufferAttribute(position, i + 2)
-      n.subVectors(b, a).cross(p.subVectors(c, a))
-      const area = n.length() / 2
-      n.normalize()
-
-      // under mesh: one tone per vertex
-      for (let v = i; v < i + 3; v++) {
-        const light = style.smooth ? lightOn(normal.getX(v), normal.getY(v), normal.getZ(v)) : lightOn(n.x, n.y, n.z)
-        const at: Vec3 = [position.getX(v) + offset.x, position.getY(v) + offset.y, position.getZ(v) + offset.z]
-        color.set(tinted(tone(part.ramp, shift + light * style.light + (style.under ?? 0)), at), v * 3)
-      }
-
-      if (!scatter || !dabs || !rand) continue
-      const wanted = area * scatter.density
-      const count = Math.floor(wanted) + (rand() < wanted % 1 ? 1 : 0)
-      for (let k = 0; k < count; k++) {
-        // a uniform point of the triangle
-        let u = rand()
-        let w = rand()
-        if (u + w > 1) {
-          u = 1 - u
-          w = 1 - w
-        }
-        const at: Vec3 = [a.x + (b.x - a.x) * u + (c.x - a.x) * w + offset.x, a.y + (b.y - a.y) * u + (c.y - a.y) * w + offset.y, a.z + (b.z - a.z) * u + (c.z - a.z) * w + offset.z]
-        let light = lightOn(n.x, n.y, n.z)
-        if (style.smooth) {
-          const s = 1 - u - w
-          light = lightOn(
-            normal.getX(i) * s + normal.getX(i + 1) * u + normal.getX(i + 2) * w,
-            normal.getY(i) * s + normal.getY(i + 1) * u + normal.getY(i + 2) * w,
-            normal.getZ(i) * s + normal.getZ(i + 1) * u + normal.getZ(i + 2) * w,
-          )
-        }
-        const t = shift + light * style.light + (rand() - 0.5) * style.noise + clumpAt(style, at)
-        const accent = scatter.accent && rand() < scatter.accent.chance ? scatter.accent.colors[Math.floor(rand() * scatter.accent.colors.length)] : undefined
-        const rgb = accent ?? tinted(tone(part.ramp, t), at)
-        const size = lerp(scatter.size[0], scatter.size[1], rand())
-        // lifted off the surface, each by its own amount: where two overlap, the same one is always on top
-        const lift = size * (0.04 + rand() * (scatter.lift ?? 0.1))
-        const lifted: Vec3 = [at[0] + n.x * lift, at[1] + n.y * lift, at[2] + n.z * lift]
-        if (scatter.lie) dabs.lie({ at: lifted, normal: [n.x, n.y, n.z], ex: size, ey: size * scatter.lie.aspect, turn: (rand() - 0.5) * scatter.lie.turn, color: rgb })
-        else dabs.face({ at: lifted, size, color: rgb })
-      }
+  build() {
+    const position = new Float32Array(this.length)
+    const color = new Float32Array(this.length)
+    let offset = 0
+    for (const chunk of this.chunks) {
+      position.set(chunk.position, offset)
+      color.set(chunk.color, offset)
+      offset += chunk.position.length
     }
-    start = end
+    const geometry = new THREE.BufferGeometry()
+    geometry.setAttribute('position', new THREE.BufferAttribute(position, 3))
+    geometry.setAttribute('aColor', new THREE.BufferAttribute(color, 3))
+    const mesh = new THREE.Mesh(geometry, underMaterial())
+    mesh.frustumCulled = false
+    return mesh
   }
-
-  geometry.setAttribute('aColor', new THREE.BufferAttribute(color, 3))
-  const mesh = new THREE.Mesh(geometry, underMaterial())
-  mesh.position.copy(offset)
-  mesh.frustumCulled = false
-  return mesh
 }

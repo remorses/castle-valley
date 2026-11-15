@@ -9,32 +9,45 @@ Run `pnpm typecheck` after every change. `pnpm dev` starts Vite.
 ```
 src/main.ts ───────▶ renderer, input, player step, game loop, debug hook
    │
-   ├──▶ src/world.ts ───── buildWorld(): one static scene, built once at load (about 2 million dabs)
+   ├──▶ src/world.ts ───── buildWorld(): one static scene, built once at load (about 2.5 million dabs)
    │       groundHeight(x, z) ◀── axis slope table + valley funnel + far hills   (also moves the player)
    │       buildZones() ─────────▶ zone map read while painting: r path, g lit ground, b forest shade
-   │       buildGround() ────────▶ under mesh + strokes, finer near the paths (GROUND_BANDS)
-   │       forest, bushes, leafy trees, firs, village, crag + castle, mountains: Parts ──▶ paint()
+   │       buildGround() ────────▶ under mesh + strokes, finer near the paths (GROUND_BANDS), grass tufts
+   │       layout tables (trees, bushes, houses, castle, peaks) ──▶ painters in things.ts
    │       sky, mist banks, cloud veil: dabs placed directly
    │
-   ├──▶ src/viewmodel.ts ─ hands as pixel sprites (torch, sword), flame wobble, sparks: own scene with an
-   │                       orthographic camera in reference pixels, drawn after the world
+   ├──▶ src/things.ts ──── painters for kinds of things, each lays underpainting + strokes on a Canvas:
+   │                       paintSolid (walls, roofs, rock), paintCrown (leaves), paintTrunk, paintFir, paintTuft
    │
-   └──▶ src/paint.ts ───── the look: RAMPS palette, Dabs (instanced quads + the one dab shader),
-                           Parts (geometry with a ramp and a bias), paint() (under mesh + scattered dabs),
-                           Style and Scatter (how a kind of thing is painted), noise helpers
+   ├──▶ src/paint.ts ───── RAMPS palette, Dabs (instanced cards + the one dab shader), Under, noise helpers
+   │       └──▶ src/brush.ts ── the brush sheet: eight marks made in code
+   │
+   └──▶ src/viewmodel.ts ─ hands as pixel sprites (torch, sword), flame wobble, sparks: own scene with an
+                           orthographic camera in reference pixels, drawn after the world
 ```
 
-The renderer follows https://patch.gg/blendi/oil-paint (source: `~/Documents/GitHub/oil-paint`), with a simpler brush.
+The painter follows https://patch.gg/blendi/oil-paint (source: `~/Documents/GitHub/oil-paint`). Read its
+`src/oilpaint/dabs.js`, `src/night/kit.js`, `src/world/forest.js` and `src/night/pines.js` before changing a painter.
 
-- **Everything visible is a dab or an under mesh.** No lights, no textures, no post-processing. Never add a
-  screen-space effect: the look must stay pinned to the world.
-- **Dabs** are flat-coloured instanced quads. `face` dabs turn to the eye. `lie` dabs lie on a surface and are
-  stood up when seen edge on. Colours are baked when the world is built.
-- **Far dabs:** each dab has a fixed rank. Past the distance where it would be smaller than `uMinPx`, only the
-  low ranks stay and grow. The vertex shader uses true distance, so turning the head changes nothing.
+- **Everything visible is a dab or an under mesh.** No lights. The look must stay pinned to the world: never add
+  an effect that reads neighbouring pixels or depends on the place on screen (pixel grids, blurs, outlines).
+- **The grade** (`main.ts`) is the one pass over the picture. The world is drawn into a render target (4 samples)
+  and graded pixel by pixel: shade toward violet, light toward warm, a lift in the darks, varnish. The palette
+  is saturated on purpose and the grade holds it together. The hands are drawn after it, ungraded.
+- **Dabs** are instanced cards that show one mark of the brush sheet. `face` dabs turn to the eye and run along
+  `dir` on the canvas. `lie` dabs lie on a surface and are stood up when seen edge on. Edges are cut with
+  alpha to coverage, so the render target needs its samples.
+- **Colours are baked** when the world is built. The shader only breaks each colour a little (`jitter`), streaks
+  a lighter one into it, and rakes a light across the paint (`uImpasto`).
+- **A mark fills about half of its card.** Solid things are covered several times over (`cover` in `SolidStyle`).
+  A crown hides its under blob with lobes of leaves and two dark dabs behind each lobe.
+- **Dabs are kept in four meshes by how they behave** (`LIMITS` in `world.ts`): least and largest size on
+  screen in reference pixels (270 on the short side), and sway.
+- **Far dabs:** each dab has a fixed rank. Past the distance where it would be smaller than its least size, only
+  the low ranks stay and grow. The vertex shader uses true distance, so turning the head changes nothing.
+- **How fine a thing is painted** depends on how near the player can come (`reachOf` in `world.ts`).
 - **Under meshes** take the light from face normals. Custom geometry must be wound outward.
 - **Colours** never go through `THREE.Color`. `hex()` keeps raw sRGB and the renderer converts nothing.
-- **Sizes on screen** are set against the reference frame, 270 pixels on the short side (`MIN_DAB` in `main.ts`).
 - **Layout** is in world units (metres). The player starts at `z = 14` and looks toward `-Z`. Tables of paths,
   meadows, houses, towers and peaks sit next to the code that uses them in `world.ts`.
 - Per-frame work is the player step, the sparks and two render calls. `window.game.counts` shows the dab counts.

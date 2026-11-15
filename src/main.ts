@@ -6,10 +6,8 @@ import { buildViewModel } from './viewmodel.ts'
 import { BACKDROP, buildWorld, groundHeight } from './world.ts'
 
 const REFERENCE_SHORT_SIDE = 270
-// least size of a dab on screen, in reference pixels
-const MIN_DAB = 1.15
 // more pixels than this on the short side cost speed and show nothing more
-const MAX_SHORT_SIDE_PIXELS = 820
+const MAX_SHORT_SIDE_PIXELS = 1080
 const EYE_HEIGHT = 1.7
 const WALK_SPEED = 3.4
 const RUN_SPEED = 7
@@ -20,13 +18,62 @@ const STICK_RADIUS = 56
 const MAX_PITCH = 1.2
 const MAX_FRAME_SECONDS = 0.05
 
-const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' })
+const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' })
 // colours are mixed as they should look on screen: nothing converts them
 renderer.outputColorSpace = THREE.LinearSRGBColorSpace
 renderer.setClearColor(new THREE.Color().setRGB(...BACKDROP, THREE.LinearSRGBColorSpace))
 renderer.autoClear = false
 const canvas = renderer.domElement
 document.body.appendChild(canvas)
+
+// ---------- the grade ----------
+
+// The world is painted in saturated colours into a picture of its own. One pass then grades that picture, pixel by
+// pixel: a single colour runs through the shade and another through the light, which holds the palette together.
+// It only changes colours, so nothing depends on where the eye is. The hands are drawn after it: they are cut from
+// the reference frame and have its colours already.
+const GRADE_FRAGMENT = /* glsl */ `
+uniform sampler2D tColor;
+uniform vec3 uShade;
+uniform vec3 uLight;
+uniform vec3 uLift;
+uniform float uSaturation;
+uniform float uVarnish;
+varying vec2 vUv;
+void main() {
+  vec3 c = texture2D(tColor, vUv).rgb;
+  float l = dot(c, vec3(0.3, 0.59, 0.11));
+  c = mix(vec3(l), c, uSaturation);
+  // the shade leans to violet and the light to a warm yellow
+  c *= mix(uShade, uLight, smoothstep(0.04, 0.6, l));
+  // the darkest paint is never black: it has the colour of the shade in it
+  c += uLift * pow(1.0 - l, 4.0);
+  // varnish: more depth in the darks, the lights left alone
+  c = mix(c, c * c * (3.0 - 2.0 * c), uVarnish);
+  gl_FragColor = vec4(c, 1.0);
+}
+`
+
+const picture = new THREE.WebGLRenderTarget(1, 1, { samples: 4, depthBuffer: true })
+const grade = new THREE.Mesh(
+  new THREE.PlaneGeometry(2, 2),
+  new THREE.ShaderMaterial({
+    uniforms: {
+      tColor: { value: picture.texture },
+      uShade: { value: new THREE.Vector3(0.88, 0.9, 1.12) },
+      uLight: { value: new THREE.Vector3(1.04, 1.0, 0.94) },
+      uLift: { value: new THREE.Vector3(0.012, 0.008, 0.03) },
+      uSaturation: { value: 1 },
+      uVarnish: { value: 0.3 },
+    },
+    vertexShader: 'varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }',
+    fragmentShader: GRADE_FRAGMENT,
+    depthTest: false,
+    depthWrite: false,
+  }),
+)
+grade.frustumCulled = false
+const flat = new THREE.Camera()
 
 const world = buildWorld()
 const hands = buildViewModel()
@@ -40,12 +87,13 @@ function resize() {
   const ratio = Math.min(devicePixelRatio, MAX_SHORT_SIDE_PIXELS / short)
   renderer.setPixelRatio(ratio)
   renderer.setSize(innerWidth, innerHeight)
+  picture.setSize(Math.round(innerWidth * ratio), Math.round(innerHeight * ratio))
   camera.aspect = innerWidth / innerHeight
   // the scene is composed for a tall screen: keep a similar horizontal view on wide ones
   camera.fov = camera.aspect < 1 ? 70 : 56
   camera.updateProjectionMatrix()
   shared.uPixel.value = (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2))) / (innerHeight * ratio)
-  shared.uMinPx.value = (MIN_DAB * short * ratio) / REFERENCE_SHORT_SIDE
+  shared.uRef.value = (short * ratio) / REFERENCE_SHORT_SIDE
   hands.resize((innerWidth * REFERENCE_SHORT_SIDE) / short, (innerHeight * REFERENCE_SHORT_SIDE) / short)
 }
 addEventListener('resize', resize)
@@ -166,9 +214,12 @@ function render(time: number) {
   camera.rotation.set(player.pitch, player.yaw, Math.sin(player.bob) * 0.006 * player.stride)
   // the sky is painted on a far sphere that travels with the eye
   world.sky.position.copy(camera.position)
+  renderer.setRenderTarget(picture)
   renderer.clear()
   renderer.render(world.scene, camera)
-  renderer.clearDepth()
+  renderer.setRenderTarget(null)
+  renderer.clear()
+  renderer.render(grade, flat)
   renderer.render(hands.scene, hands.camera)
 }
 
@@ -184,6 +235,7 @@ const debug = {
   stick,
   counts: world.counts,
   scene: world.scene,
+  grade: grade.material.uniforms,
   manual: false,
   time: 3,
   /** place the player, draw one frame, return it as a PNG data URL */

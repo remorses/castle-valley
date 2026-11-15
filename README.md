@@ -16,19 +16,25 @@ pnpm dev
 
 ## How it looks painted
 
-The whole world is made of **dabs**: flat-coloured rectangles pinned to points in 3D. There is no filter on top
-and no pixel grid on the screen. The idea is from https://patch.gg/blendi/oil-paint, with a much simpler brush.
+The whole world is made of **dabs**: single marks of a bristle brush, pinned to points in 3D. No filter makes
+the strokes. The painter follows https://patch.gg/blendi/oil-paint.
 
 ```
-under mesh ── coarse geometry in flat colours, so nothing shows between the dabs
-dabs ──────── about 2 million instanced quads, one flat colour each
-               face: a square that turns to the eye (leaves, rock, cloud, sky)
-               lie:  a stroke that lies on its surface (ground, walls, bark)
+under ── coarse geometry in flat colours: the underpainting, so nothing shows between the dabs
+dabs ─── about 2.5 million instanced cards, each one mark of the brush sheet in one mixed colour
+          face: turns to the eye and runs along a direction (leaves, bark, boughs, grass, cloud)
+          lie:  lies on its surface and runs along its grain (ground, walls, roofs, rock)
 ```
 
 - **Pinned to the world.** A dab never moves, so the paint stays on things when you walk or turn.
-- **Colours are mixed once**, when the world is built: a tone from a small ramp, picked by light and chance.
-  The ramps are measured from the reference video (`RAMPS` in `src/paint.ts`).
+- **The brush** is a sheet of eight marks made in code (`src/brush.ts`): long strokes that run dry, curved
+  strokes, pressed dabs. A light from the upper left rakes across the thick paint.
+- **Colours are mixed once**, when the world is built: a tone from a ramp, picked by light and chance. The ramps
+  are measured from the reference video (`RAMPS` in `src/paint.ts`).
+- **Each kind of thing has its painter** (`src/things.ts`): lobes of leaves round a dark core, bark up a trunk,
+  boughs that hang from a fir, strokes along the grain of a wall, flicks of grass.
+- **One colour grade** runs over the finished picture (`src/main.ts`): the shade leans to violet and the light
+  to warm yellow, which holds the saturated palette together. It changes colours only, pixel by pixel.
 - **Far away, fewer and larger dabs.** Each dab has a fixed rank. With distance only the low ranks stay and
   grow to cover their neighbours, so strokes never swap.
 
