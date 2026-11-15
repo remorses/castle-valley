@@ -3,7 +3,7 @@
 A playable three.js scene: you walk out of a dark forest, torch and sword in hand, toward a
 village under a castle. It recreates this pixel-art clip: https://x.com/de5imulate/status/1947024682118488116
 
-**Play it:** https://castle.kimaki.dev
+**Play it:** https://omw-game.kimaki.dev
 
 ```bash
 pnpm install
@@ -55,7 +55,7 @@ The game is a static site on Cloudflare Workers (`wrangler.jsonc`): no Worker co
 
 ```bash
 pnpm run deploy        # preview, on workers.dev
-pnpm run deploy:prod   # https://castle.kimaki.dev
+pnpm run deploy:prod   # https://omw-game.kimaki.dev
 ```
 
 See `AGENTS.md` for the code layout.
