@@ -128,6 +128,12 @@ bun scripts/cut-sprite.ts assets/sword-source.jpg public/sprites/sword.png 135 4
 Sprite layouts (margins past the screen corner, flame rectangle, sword pivot) are the `TORCH` and `SWORD`
 tables in `src/viewmodel.ts`. Update them when a sprite changes size.
 
+The hands walk as in the reference clip (`WALK` in `src/viewmodel.ts`): both sway to the same side together and
+each dips at the ends of its swing. The numbers are measured, not tuned: the sprites were laid over every frame
+of the clip (best offset by mean colour difference) and the paths fitted with two harmonics of the walk cycle.
+The clip's camera does not bob: its background only drifts slowly, so all the life of the walk is in the hands.
+`WALK_CADENCE` in `main.ts` is the clip's cycle, 0.87 s for two steps.
+
 ## checking the look
 
 `window.game` is a debug hook (`src/main.ts`):

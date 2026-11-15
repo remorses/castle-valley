@@ -9,6 +9,21 @@ import { hex, shared } from './paint.ts'
 const REFERENCE = { width: 270, height: 405 }
 // On a wide screen the hands stay this far apart at most, in sprite pixels: about 1.1 times the screen's height.
 const HANDS_MAX_SPAN = 445
+// On a low screen the sprites shrink until this many of their rows fit its height: the whole blade with room to
+// sway over it, the fist and a little forearm. A tall screen shows them 1:1, as the reference does.
+const HANDS_LEAST_ROWS = 340
+// rows of screen kept free over the tip of the blade at rest: it sways up
+const TIP_ROOM = 22
+
+// The walk of the reference clip, measured by laying the sprites over each of its frames (0.87 s for two steps).
+// Both hands sway to the same side together, 22 pixels from end to end, and each dips at the ends of its
+// swing: deepest on its own side, where its foot comes down. Sprite pixels, x right and y up, as a mean and
+// two harmonics of the walk cycle: mean, cos, sin, cos of twice the phase, sin of twice the phase.
+const WALK = {
+  torch: { x: [-7, 10.9, 0, -0.2, 0.4], y: [0.2, 2.6, 0.2, -3.2, 3.3] },
+  sword: { x: [-7.3, 9.2, -3.8, 0.2, 1.2], y: [-0.3, -2.8, 2.6, -5, 2.6] },
+}
+const swayAt = (c: number[], phase: number) => c[0] + c[1] * Math.cos(phase) + c[2] * Math.sin(phase) + c[3] * Math.cos(2 * phase) + c[4] * Math.sin(2 * phase)
 const SWING_SECONDS = 0.42
 // the share of a swing at which the blade lands
 const STRIKE_AT = 0.3
@@ -35,6 +50,8 @@ const SWORD = {
   pivot: [60, 112],
   /** the sleeve runs off the right edge of the sprite up to this height */
   cut: 112,
+  /** the tip of the blade */
+  tip: 402,
 }
 
 const SPRITE_VERTEX = /* glsl */ `
@@ -242,13 +259,15 @@ export function buildViewModel({ hearts: heartCount }: { hearts: number }) {
       camera.updateProjectionMatrix()
       width = renderWidth
       height = renderHeight
-      // sprites are 1:1 on a tall screen and shrink to fit the height of a wide one
-      scale = Math.min(renderWidth / REFERENCE.width, renderHeight / REFERENCE.height)
+      scale = Math.min(renderWidth / REFERENCE.width, renderHeight / HANDS_LEAST_ROWS)
       // how far each hand is moved in from its corner of the screen
       inset = Math.max(0, (renderWidth / scale - HANDS_MAX_SPAN) / 2)
       // Moved in, the sword arm would show where its sleeve ends at the sprite's edge: it is lowered until the
       // sleeve is below the screen and the fist rises from the bottom edge.
-      swordDrop = (SWORD.cut - SWORD.margin[1]) * THREE.MathUtils.smoothstep(inset, 0, SWORD.margin[0])
+      const sleeveDrop = (SWORD.cut - SWORD.margin[1]) * THREE.MathUtils.smoothstep(inset, 0, SWORD.margin[0])
+      // on a low screen it is lowered until the tip of the blade is inside the picture
+      const tipDrop = SWORD.tip - SWORD.margin[1] + TIP_ROOM - renderHeight / scale
+      swordDrop = Math.max(sleeveDrop, tipDrop, 0)
       torch.scale.setScalar(scale)
       sword.scale.setScalar(scale)
       for (const heart of hearts) heart.scale.setScalar(scale)
@@ -270,8 +289,8 @@ export function buildViewModel({ hearts: heartCount }: { hearts: number }) {
       const hang = THREE.MathUtils.clamp(-rise * HANG.rate, -HANG.most, HANG.most)
       const idle = Math.sin(time * 1.1) * 1.2
       torch.position.set(
-        Math.round((inset - TORCH.margin[0] + Math.sin(bob) * 4 * stride + lag) * scale),
-        Math.round((-TORCH.margin[1] + Math.abs(Math.cos(bob)) * 5 * stride + idle + hang) * scale),
+        Math.round((inset - TORCH.margin[0] + swayAt(WALK.torch.x, bob) * stride + lag) * scale),
+        Math.round((-TORCH.margin[1] + swayAt(WALK.torch.y, bob) * stride + idle + hang) * scale),
         0,
       )
       hearts.forEach((heart, i) => {
@@ -288,8 +307,8 @@ export function buildViewModel({ hearts: heartCount }: { hearts: number }) {
       const restX = width / scale - inset - (SWORD.size[0] - SWORD.margin[0]) + SWORD.pivot[0]
       const restY = -SWORD.margin[1] - swordDrop + SWORD.pivot[1]
       sword.position.set(
-        Math.round((restX + Math.sin(bob + 1.3) * 5 * stride + lag * 1.4 - slash * 46) * scale),
-        Math.round((restY + Math.abs(Math.cos(bob + 1.3)) * 6 * stride - idle - slash * 14 + hang * 1.2) * scale),
+        Math.round((restX + swayAt(WALK.sword.x, bob) * stride + lag * 1.4 - slash * 46) * scale),
+        Math.round((restY + swayAt(WALK.sword.y, bob) * stride - idle - slash * 14 + hang * 1.2) * scale),
         0,
       )
       sword.rotation.z = slash * 1.2

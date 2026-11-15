@@ -27,6 +27,10 @@ const WIDE_FOV = 56
 const TALL_ASPECT = 2 / 3
 const WIDE_ASPECT = 1.6
 const WALK_SPEED = 3.4
+// The walk cycle (two steps) of the reference clip takes 0.87 s: radians of it a second at a walk. At a run
+// the steps come faster, but less than the speed does (CADENCE_POWER): the strides are longer too.
+const WALK_CADENCE = 7.24
+const CADENCE_POWER = 0.6
 const RUN_SPEED = 7
 const PLAYER_RADIUS = 0.4
 const LOOK_SPEED = 0.0023
@@ -434,7 +438,7 @@ function step(dt: number) {
   player.stride += (Math.min(moving / WALK_SPEED, 1.4) - player.stride) * ease
   // a foot comes down at every half turn of the walk cycle, louder at a run
   const strides = Math.floor(player.bob / Math.PI)
-  player.bob += moving * dt * 1.9
+  player.bob += WALK_CADENCE * Math.pow(moving / WALK_SPEED, CADENCE_POWER) * dt
   if (Math.floor(player.bob / Math.PI) !== strides) audio.play({ sound: footfall, volume: THREE.MathUtils.clamp(moving / RUN_SPEED, 0.5, 1) })
   if (moving > 0.5 && hint.style.opacity !== '0') hint.style.opacity = '0'
 }
